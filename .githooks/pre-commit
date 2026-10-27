@@ -1,0 +1,12 @@
+#!/bin/sh
+# Builds bashrc.sh and windows-setup.ps1, adds them to the commit, then copies them to the blog (which serves them on zez.dev)
+# Enable with: git config core.hooksPath .githooks
+set -e
+
+python build.py
+git add bashrc.sh windows-setup.ps1 keyboard.dll
+cp bashrc.sh windows-setup.ps1 ../blog/articles/public/
+cd ../blog
+git add articles/public/windows-setup.ps1 articles/public/bashrc.sh
+git commit -m "update setup scripts"
+git push

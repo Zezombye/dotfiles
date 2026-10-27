@@ -1,9 +1,9 @@
 
 $defaultUserHive = "zez.dev_DefaultUser"
 $defaultUserClassesHive = "zez.dev_DefaultUser_Classes"
+$defaultUserProfile = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList").Default
 
 function loadDefaultUserHives {
-    $defaultUserProfile = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList").Default
     $hives = @(
         @($defaultUserHive, "$defaultUserProfile\NTUSER.DAT"),
         #HKCU\Software\Classes is stored in UsrClass.dat instead of NTUSER.DAT

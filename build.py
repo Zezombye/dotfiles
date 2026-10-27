@@ -7,13 +7,16 @@ Directives, which must be alone on their line:
     - "command" (optional): only write the file if this command exists.
     - "needsAdmin" (optional): only write the file if running as admin (root for bash).
     - "applyConfigValues" (optional): replace ###key### placeholders in "src" with the values of config.json.
+    - "defaultUser" (optional, true by default): in windows-setup.ps1, destinations in $env:USERPROFILE, $env:APPDATA or $env:LOCALAPPDATA are also written to the default user profile if $applyToDefaultUser.
     - .klc files are compiled to a keyboard layout dll with Microsoft Keyboard Layout Creator.
     - Backslashes are literal, so that Windows paths can be written as is.
 
 ###key### placeholders in main.sh, main.ps1 and included files are replaced with the values of config.json.
+###DATE### is replaced with the most recent modification date of the files used to build the output, which is also set as the output's modification date.
 """
 
 import base64
+import datetime
 import json
 import os
 import re
@@ -29,7 +32,9 @@ KBDUTOOL = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) 
 
 DIRECTIVE_RE = re.compile(r"^(\s*)§(\w+) (.*)$")
 PLACEHOLDER_RE = re.compile(r"###(\w+)###")
-WRITE_FILE_KEYS = {"src", "dest", "msg", "command", "needsAdmin", "applyConfigValues"}
+WRITE_FILE_KEYS = {"src", "dest", "msg", "command", "needsAdmin", "applyConfigValues", "defaultUser"}
+DEFAULT_USER_DEST_RE = re.compile(r"^\$env:(USERPROFILE|APPDATA|LOCALAPPDATA)(?=\\)", re.IGNORECASE)
+DEFAULT_USER_FOLDERS = {"USERPROFILE": "", "APPDATA": r"\AppData\Roaming", "LOCALAPPDATA": r"\AppData\Local"}
 # Used to turn the "msg" of §writeFile into "Cannot <verb> ..., needs admin rights". Add verbs as needed.
 PRESENT_TENSE = {"Added": "add", "Applied": "apply", "Installed": "install", "Set": "set"}
 
@@ -39,10 +44,14 @@ def read_text(path):
         return f.read()
 
 
-def apply_config_values(text, origin):
+def apply_config_values(text, origin, inputs, keep_date=False):
     def replace(match):
+        if keep_date and match.group(1) == "DATE":
+            # Replaced in build(), once all the inputs are known
+            return match.group(0)
         if match.group(1) not in CONFIG:
             raise KeyError(f"Unknown placeholder '{match.group(0)}' in {origin}")
+        inputs.add(CONFIG_PATH)
         return str(CONFIG[match.group(1)])
     return PLACEHOLDER_RE.sub(replace, text)
 
@@ -105,7 +114,8 @@ def write_file_bash(dest, content_b64, mtime, msg, command, needs_admin):
     return lines
 
 
-def write_file_ps1(dest, content_b64, mtime, msg, command, needs_admin):
+def write_file_ps1(dest, mtime, msg, command, needs_admin):
+    # The content is in $writeFileContent, so that it is not duplicated for the default user
     lines = [
         f'$writeFileDest = "{dest}"',
         f"if ((Test-Path -LiteralPath $writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds({mtime}).UtcDateTime) {{",
@@ -124,14 +134,14 @@ def write_file_ps1(dest, content_b64, mtime, msg, command, needs_admin):
     lines += [
         "} else {",
         "    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null",
-        f"    [IO.File]::WriteAllBytes($writeFileDest, [Convert]::FromBase64String('{content_b64}'))",
+        "    [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)",
         f"    echo {ps_quote(msg)}",
         "}",
     ]
     return lines
 
 
-def write_file(arg, lang, origin):
+def write_file(arg, lang, origin, inputs):
     # Backslashes are literal, so escape them before parsing
     args = json.loads(arg.replace("\\", "\\\\"))
     unknown_keys = set(args) - WRITE_FILE_KEYS
@@ -139,47 +149,68 @@ def write_file(arg, lang, origin):
         raise KeyError(f"Unknown keys {unknown_keys} in §writeFile in {origin}")
 
     src = ROOT / args["src"]
+    inputs.add(src)
     mtime = src.stat().st_mtime
     if src.suffix == ".klc":
         content = compile_klc(src).read_bytes()
     elif args.get("applyConfigValues"):
-        content = apply_config_values(read_text(src), src.name).encode("utf-8")
+        content = apply_config_values(read_text(src), src.name, inputs).encode("utf-8")
         mtime = max(mtime, CONFIG_PATH.stat().st_mtime)
     else:
         content = src.read_bytes()
 
-    generate = write_file_bash if lang == "bash" else write_file_ps1
-    return generate(args["dest"], base64.b64encode(content).decode("ascii"), int(mtime), args["msg"], args.get("command"), args.get("needsAdmin", False))
+    dest, msg, command, needs_admin = args["dest"], args["msg"], args.get("command"), args.get("needsAdmin", False)
+    content_b64 = base64.b64encode(content).decode("ascii")
+    if lang == "bash":
+        return write_file_bash(dest, content_b64, int(mtime), msg, command, needs_admin)
+
+    lines = [f"$writeFileContent = [Convert]::FromBase64String('{content_b64}')"]
+    lines += write_file_ps1(dest, int(mtime), msg, command, needs_admin)
+    match = DEFAULT_USER_DEST_RE.match(dest)
+    if match and args.get("defaultUser", True):
+        default_user_dest = "$defaultUserProfile" + DEFAULT_USER_FOLDERS[match.group(1).upper()] + dest[match.end():]
+        lines.append("if ($applyToDefaultUser) {")
+        lines += ["    " + line for line in write_file_ps1(default_user_dest, int(mtime), msg + " for default user", command, needs_admin)]
+        lines.append("}")
+    return lines
 
 
-def process(path, lang):
+def process(path, lang, inputs):
+    inputs.add(path)
     out = []
     for line in read_text(path).split("\n"):
         match = DIRECTIVE_RE.match(line)
         if not match:
-            out.append(apply_config_values(line, path.name))
+            out.append(apply_config_values(line, path.name, inputs, keep_date=True))
             continue
         indent, directive, arg = match.groups()
         if directive == "include":
             # Do not indent included files, as it would break here-strings
-            out.append(process(ROOT / arg.strip(), lang).removesuffix("\n"))
+            out.append(process(ROOT / arg.strip(), lang, inputs).removesuffix("\n"))
         elif directive == "writeFile":
-            out += [indent + generated_line for generated_line in write_file(arg, lang, path.name)]
+            out += [indent + generated_line for generated_line in write_file(arg, lang, path.name, inputs)]
         else:
             raise ValueError(f"Unknown directive '§{directive}' in {path.name}")
     return "\n".join(out)
 
 
 def build(src, dest, lang):
-    content = process(ROOT / src, lang)
+    inputs = set()
+    content = process(ROOT / src, lang, inputs)
+    # Use the date of the inputs rather than the current date, so that the output only changes when an input changes
+    date = max(path.stat().st_mtime for path in inputs)
+    iso_date = datetime.datetime.fromtimestamp(date, datetime.timezone.utc).strftime("%Y-%m-%d")
+    content = content.replace("###DATE###", iso_date)
+
     dest_path = ROOT / dest
-    # Only write if changed, as the modification date of bashrc.sh is used by §writeFile in windows-setup.ps1
     if dest_path.exists() and read_text(dest_path) == content:
         print(f"{dest} is up to date")
-        return
-    with open(dest_path, "w", encoding="utf-8", newline="") as f:
-        f.write(content)
-    print(f"Wrote {dest}")
+    else:
+        with open(dest_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        print(f"Wrote {dest}")
+    # The modification date of bashrc.sh is used by §writeFile in windows-setup.ps1
+    os.utime(dest_path, (date, date))
 
 
 # bashrc.sh must be built first, as it is embedded in windows-setup.ps1

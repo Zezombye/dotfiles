@@ -1,7 +1,8 @@
+# Version: ###DATE###
 # irm zez.dev | iex
 
 echo ""
-echo "   _____             _          _       ___           __                      _____      __            "
+echo "   _____             _          _       ___         __                      _____      __            "
 echo "  /__  /  ___  ____ ( )_____   | |     / (_)___  ____/ /___ _      _______   / ___/___  / /___  ______ "
 echo "    / /  / _ \/_  / |// ___/   | | /| / / / __ \/ __  / __ \ | /| / / ___/   \__ \/ _ \/ __/ / / / __ \"
 echo "   / /__/  __/ / /_  (__  )    | |/ |/ / / / / / /_/ / /_/ / |/ |/ (__  )   ___/ /  __/ /_/ /_/ / /_/ /"
@@ -87,7 +88,8 @@ if ($isWindows11) {
         @("SetProperty", "HKCU:/Control Panel\Desktop\WindowMetrics", "ScrollWidth", "-330", @{signout=$true})
     )
 
-    §writeFile {"src": "w11_terminal.json", "dest": "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json", "applyConfigValues": true, "msg": "Applied Windows Terminal settings"}
+    #Not applied to the default user, as AppData\Local\Packages is created when the apps are installed for a new user, and pre-creating it may break that
+    §writeFile {"src": "w11_terminal.json", "dest": "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json", "applyConfigValues": true, "msg": "Applied Windows Terminal settings", "defaultUser": false}
 }
 
 applyRegEdits "Disable window shake to minimize" @(
@@ -233,9 +235,6 @@ function patchShortcut {
     )
 
     $shortcutContent = [System.Convert]::FromBase64String($shortcutContentBase64)
-    if (-not (Test-Path -LiteralPath $shortcutPath)) {
-        New-Item -Path $shortcutPath -ItemType File -Force | Out-Null
-    }
     for ($i = 0; $i -lt $colors.Count; $i++) {
         $offset = $colorOffset + ($i * 4) + 1 # +1 for the first byte which is always 0
         hexToRgb $colors[$i] | ForEach-Object { $shortcutContent[$offset++] = $_ }
@@ -246,14 +245,24 @@ function patchShortcut {
         $shortcutContent[$sizeOffset + 6] = $consoleHeight
     }
     
-    $existingContent = Get-Content -LiteralPath $shortcutPath -Encoding Byte
-    if (@(Compare-Object $existingContent $shortcutContent -SyncWindow 0).Length -eq 0) {
-        Write-Host "Already patched $shortcutDesc shortcut" -ForegroundColor DarkGray
-        return
+    $targets = @(,@($shortcutPath, ""))
+    if ($applyToDefaultUser) {
+        $targets += ,@($shortcutPath.Replace($env:APPDATA, "$defaultUserProfile\AppData\Roaming"), " for default user")
     }
+    foreach ($target in $targets) {
+        $targetPath, $titleSuffix = $target
+        if (-not (Test-Path -LiteralPath $targetPath)) {
+            New-Item -Path $targetPath -ItemType File -Force | Out-Null
+        }
+        $existingContent = Get-Content -LiteralPath $targetPath -Encoding Byte
+        if (@(Compare-Object $existingContent $shortcutContent -SyncWindow 0).Length -eq 0) {
+            Write-Host "Already patched $shortcutDesc shortcut$titleSuffix" -ForegroundColor DarkGray
+            continue
+        }
 
-    Set-Content -LiteralPath $shortcutPath -Value $shortcutContent -Encoding Byte
-    echo "Patched $shortcutDesc shortcut"
+        Set-Content -LiteralPath $targetPath -Value $shortcutContent -Encoding Byte
+        echo "Patched $shortcutDesc shortcut$titleSuffix"
+    }
 }
 
 patchShortcut "powershell" "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Windows PowerShell\Windows PowerShell.lnk" "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" 0x87E 0x7FF
@@ -296,19 +305,36 @@ applyRegEdits "Set SYSTEM cmd.exe prompt" @(
 
 
 §writeFile {"src": "profile.ps1", "dest": "$env:USERPROFILE\Documents\WindowsPowerShell\profile.ps1", "msg": "Set PowerShell profile"}
-§writeFile {"src": "profile.ps1", "dest": "$env:USERPROFILE\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1", "msg": "Set PowerShell profile"}
 §writeFile {"src": "profile.ps1", "dest": "C:\WINDOWS\system32\config\systemprofile\Documents\WindowsPowerShell\profile.ps1", "msg": "Set SYSTEM PowerShell profile", "needsAdmin": true}
-§writeFile {"src": "profile.ps1", "dest": "C:\WINDOWS\system32\config\systemprofile\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1", "msg": "Set SYSTEM PowerShell profile", "needsAdmin": true}
+
+#profile.ps1 is loaded by all hosts, Microsoft.PowerShell_profile.ps1 only by the console (after profile.ps1), so an old copy would override the prompt
+$consoleProfilePath = "$env:USERPROFILE\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1"
+if (Test-Path -LiteralPath $consoleProfilePath) {
+    Remove-Item -LiteralPath $consoleProfilePath
+    echo "Removed Microsoft.PowerShell_profile.ps1"
+}
+$consoleProfilePath = "C:\WINDOWS\system32\config\systemprofile\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1"
+if (-not $isAdmin) {
+    Write-Host "Cannot remove SYSTEM Microsoft.PowerShell_profile.ps1, needs admin rights" -ForegroundColor Yellow
+} elseif (Test-Path -LiteralPath $consoleProfilePath) {
+    Remove-Item -LiteralPath $consoleProfilePath
+    echo "Removed SYSTEM Microsoft.PowerShell_profile.ps1"
+}
 
 
 §writeFile {"src": "bashrc.sh", "dest": "$env:USERPROFILE\.bashrc", "msg": "Set .bashrc"}
 
-if (-not (Test-Path "$env:USERPROFILE\.bash_profile")) {
-    echo "Creating .bash_profile to source .bashrc and .profile"
-    [IO.File]::WriteAllText("$env:USERPROFILE\.bash_profile", @'
+$bashProfileContent = @'
 test -f ~/.profile && . ~/.profile
 test -f ~/.bashrc && . ~/.bashrc
-'@)
+'@
+if (-not (Test-Path "$env:USERPROFILE\.bash_profile")) {
+    echo "Creating .bash_profile to source .bashrc and .profile"
+    [IO.File]::WriteAllText("$env:USERPROFILE\.bash_profile", $bashProfileContent)
+}
+if ($applyToDefaultUser -and -not (Test-Path "$defaultUserProfile\.bash_profile")) {
+    echo "Creating .bash_profile to source .bashrc and .profile for default user"
+    [IO.File]::WriteAllText("$defaultUserProfile\.bash_profile", $bashProfileContent)
 }
 
 # Custom French keyboard

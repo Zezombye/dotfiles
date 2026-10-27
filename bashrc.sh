@@ -1,4 +1,5 @@
 #!/bin/bash
+# .bashrc version 2026-10-27
 # curl zez.dev -Lo .bashrc
 # wget zez.dev -O .bashrc
 
