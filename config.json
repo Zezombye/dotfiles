@@ -1,0 +1,21 @@
+{
+    "consoleWidth": 120,
+    "consoleHeight": 34,
+    
+    "black": "#181818",
+    "blue": "#4989E2",
+    "green": "#40C73D",
+    "cyan": "#11A8CD",
+    "red": "#CD3131",
+    "purple": "#CA5ACA",
+    "yellow": "#E5E510",
+    "white": "#D7D7D7",
+    "brightBlack": "#969696",
+    "brightBlue": "#4A98F5",
+    "brightGreen": "#46CE46",
+    "brightCyan": "#29B8DB",
+    "brightRed": "#F14C4C",
+    "brightPurple": "#D670D6",
+    "brightYellow": "#F5F543",
+    "brightWhite": "#F2F2F2"
+}
