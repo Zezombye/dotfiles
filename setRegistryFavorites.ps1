@@ -1,5 +1,9 @@
 
 function setRegistryFavorites {
+    param (
+        [string]$favoritesPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit\Favorites",
+        [string]$titleSuffix = ""
+    )
     $favorites = @(
         "HKCR:\AllFilesystemObjects",
         "HKCR:\CLSID",
@@ -23,7 +27,6 @@ function setRegistryFavorites {
         "HKLM:\System\CurrentControlSet\Control\Session Manager\Environment"
     )
 
-    $favoritesPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit\Favorites"
     if (-not (Test-Path $favoritesPath)) {
         New-Item -Path $favoritesPath -Force | Out-Null
     }
@@ -88,7 +91,7 @@ function setRegistryFavorites {
     }
 
     if ($nbAddedFavorites -eq 0) {
-        Write-Host "Already added Regedit favorites" -ForegroundColor DarkGray
+        Write-Host "Already added Regedit favorites$titleSuffix" -ForegroundColor DarkGray
         return
     }
 
@@ -146,6 +149,9 @@ function setRegistryFavorites {
             Set-ItemProperty -Path $favoritesPath -Name $item.Name -Value $item.Value
         }
     }
-    Write-Host "Added $nbAddedFavorites Regedit Favorites"
+    Write-Host "Added $nbAddedFavorites Regedit Favorites$titleSuffix"
 }
 setRegistryFavorites
+if ($applyToDefaultUser) {
+    setRegistryFavorites (getDefaultUserRegPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit\Favorites") " for default user"
+}

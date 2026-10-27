@@ -24,14 +24,12 @@ function setExplorerQuickAccessRibbon {
             $areModificationsRequired = $true
         }
     }
-    if (-not $areModificationsRequired) {
-        Write-Host "Already added Powershell to Explorer Quick Access ribbon" -ForegroundColor DarkGray
-        return
+    if ($areModificationsRequired) {
+        $raw = [Text.Encoding]::UTF8.GetBytes($xml.OuterXml)
     }
-
-    $updated = $xml.OuterXml
-    $bytes = [Text.Encoding]::UTF8.GetBytes($updated)
-    Set-ItemProperty -Path $path -Name $valueName -Value $bytes -Type Binary
-    echo "Added Powershell to Explorer Quick Access ribbon"
+    #Use applyRegEdits even if no modifications are required, so that the value is also applied to the default user
+    applyRegEdits "Add Powershell to Explorer Quick Access ribbon" @(
+        @("SetProperty", $path, $valueName, $raw)
+    )
 }
 setExplorerQuickAccessRibbon

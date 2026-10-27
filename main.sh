@@ -130,6 +130,10 @@ export PYTHONDONTWRITEBYTECODE=1
 #Unfortunately max sqlite prompt length is 18 chars (including escape chars) so we can only have 5 chars max displayed
 §writeFile {"src": "sqliterc", "dest": "~/.sqliterc", "msg": "Added .sqliterc", "command": "sqlite3"}
 
+#Add color to mysql prompt: "mysql user:database> "
+#\001 and \002 delimit non-printing characters, so that readline/editline computes the prompt length correctly
+export MYSQL_PS1=$'\001\e[01;35m\002mysql\001\e[0m\002 \001\e[01;32m\002\\u\001\e[0m\002:\001\e[01;34m\002\\d\001\e[0m\002> '
+
 #Add color to mongodb prompt. Disabled as I don't use mongodb cli
 #cat << EOF > ~/.mongorc.js
 #//Note: this is automatically generated and overwritten by .bashrc

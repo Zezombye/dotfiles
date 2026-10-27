@@ -14,6 +14,24 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+
+function promptRelaunchAsAdmin {
+    #Returns $true if the script was relaunched in a new elevated window
+    if ($isAdmin) {return $false}
+    $answer = Read-Host "Not running as Administrator. Relaunch as Administrator? [Y/n]"
+    if ($answer -notin @("", "y", "yes")) {return $false}
+    if ($PSCommandPath) {
+        $arguments = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
+    } else {
+        #Launched with "irm zez.dev | iex", so there is no script file to relaunch
+        $arguments = @("-NoExit", "-Command", "irm zez.dev | iex")
+    }
+    Start-Process powershell.exe -Verb RunAs -ArgumentList $arguments
+    return $true
+}
+#Use return instead of exit, as exit would close the user's console when launched with iex
+if (promptRelaunchAsAdmin) {return}
+
 if ($isAdmin) {echo "Running as Administrator"} else {echo "Running as standard user. Some tweaks may not be applied."}
 
 $isWindows11 = ((Get-CimInstance -ClassName Win32_OperatingSystem).Version -ge "10.0.22000")
@@ -27,6 +45,20 @@ if (-not (Test-Path "HKU:")) {New-PSDrive HKU Registry HKEY_USERS | Out-Null}
 if (-not (Test-Path "HKCR:")) {New-PSDrive -Name "HKCR" -PSProvider Registry -Root "HKEY_CLASSES_ROOT" | Out-Null}
 
 §include utils.ps1
+
+$applyToDefaultUser = $false
+if ($isAdmin) {
+    $answer = Read-Host "Also apply the HKCU tweaks to the default user (template for new users)? [y/N]"
+    $applyToDefaultUser = $answer -in @("y", "yes")
+}
+if ($applyToDefaultUser) {
+    loadDefaultUserHives
+}
+#Make sure the default user hives are unloaded if the script crashes, as a loaded hive locks the default profile files
+trap {
+    if ($applyToDefaultUser) {unloadDefaultUserHives}
+    break
+}
 
 §include taskbar.ps1
 §include explorer.ps1
@@ -110,23 +142,25 @@ applyRegEdits "Set blue accent color" @(
 
 §include setRegistryFavorites.ps1
 
-
-$taskManagerSettings = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\TaskManager").Preferences
-if ($taskManagerSettings[28] -eq 0) {
-    Write-Host "Already set Task Manager to expanded view" -ForegroundColor DarkGray
-} else {
-    $taskManagerSettings[28] = 0 #1 for compact view, 0 for expanded view
-    Set-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\TaskManager" -Name "Preferences" -Value $taskManagerSettings
-    echo "Set Task Manager to expanded view"
-}
-
 applyRegEdits "Fix console colors for Python" @(
     @("SetProperty", "HKCU:/Console", "VirtualTerminalLevel", 1)
 )
 
+function hexToRgb {
+    param ([string]$hex)
+    if ($hex -notmatch '^#[0-9A-Fa-f]{6}$') {throw "Invalid hex color '$hex'"}
+    return [byte[]]@(
+        [Convert]::ToByte($hex.Substring(1, 2), 16),
+        [Convert]::ToByte($hex.Substring(3, 2), 16),
+        [Convert]::ToByte($hex.Substring(5, 2), 16)
+    )
+}
+
 # In the registry, those values are stored in little endian
 function hexToAABBGGRR {
-    #todo
+    param ([string]$hex)
+    $rgb = hexToRgb $hex
+    return '00{0:X2}{1:X2}{2:X2}' -f $rgb[2], $rgb[1], $rgb[0]
 }
 
 $consoleWidth = ###consoleWidth###
@@ -134,7 +168,7 @@ $consoleHeight = ###consoleHeight###
 
 $colors = @(
     "###black###", "###blue###", "###green###", "###cyan###", "###red###", "###purple###", "###yellow###", "###white###", 
-    "###brightBlack###", "###brightBlue###", "###brightGreen###", "###brightCyan###", "###brightRed###", "###brightPurple###", "###brightYellow###", "###brightWhite###", 
+    "###brightBlack###", "###brightBlue###", "###brightGreen###", "###brightCyan###", "###brightRed###", "###brightPurple###", "###brightYellow###", "###brightWhite###"
 )
 $regPaths = @(
     "HKCU:\Console",
@@ -161,9 +195,9 @@ foreach ($regPath in $regPaths) {
     }[$regPath.Split('\')[-1]]
 
     if ($regPath.startsWith("HKU:\S-1-5-18")) {
-        $user = "SYSTEM"
+        $user = "SYSTEM "
     } else {
-        $user = "current user"
+        $user = ""
     }
     $modifications = @()
     for ($i = 0; $i -lt $colors.Count; $i++) {
@@ -172,9 +206,9 @@ foreach ($regPath in $regPaths) {
         $regKey = "ColorTable{0:d2}" -f $i
         $modifications += ,@("SetProperty", $regPath, $regKey, $colorValue)
     }
-    applyRegEdits "Set $user $cmdType colors" $modifications
+    applyRegEdits "Set $user$cmdType colors" $modifications
 
-    applyRegEdits "Set $user $cmdType additional properties" @(
+    applyRegEdits "Set $user$cmdType additional properties" @(
         @("SetProperty", $regPath, "ScreenColors", 0x00000007), # black on white
         @("SetProperty", $regPath, "PopupColors", 0x00000007), # black on white
         @("SetProperty", $regPath, "FaceName", "Consolas"),
@@ -204,7 +238,7 @@ function patchShortcut {
     }
     for ($i = 0; $i -lt $colors.Count; $i++) {
         $offset = $colorOffset + ($i * 4) + 1 # +1 for the first byte which is always 0
-        $colors[$i] | ForEach-Object { $shortcutContent[$offset++] = $_ }
+        hexToRgb $colors[$i] | ForEach-Object { $shortcutContent[$offset++] = $_ }
     }
     if ($sizeOffset) {
         $shortcutContent[$sizeOffset] = $consoleWidth
@@ -263,8 +297,8 @@ applyRegEdits "Set SYSTEM cmd.exe prompt" @(
 
 §writeFile {"src": "profile.ps1", "dest": "$env:USERPROFILE\Documents\WindowsPowerShell\profile.ps1", "msg": "Set PowerShell profile"}
 §writeFile {"src": "profile.ps1", "dest": "$env:USERPROFILE\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1", "msg": "Set PowerShell profile"}
-§writeFile {"src": "profile.ps1", "dest": "C:\WINDOWS\system32\config\systemprofile\Documents\WindowsPowerShell\profile.ps1", "msg": "Set PowerShell profile", "needsAdmin": true}
-§writeFile {"src": "profile.ps1", "dest": "C:\WINDOWS\system32\config\systemprofile\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1", "msg": "Set PowerShell profile", "needsAdmin": true}
+§writeFile {"src": "profile.ps1", "dest": "C:\WINDOWS\system32\config\systemprofile\Documents\WindowsPowerShell\profile.ps1", "msg": "Set SYSTEM PowerShell profile", "needsAdmin": true}
+§writeFile {"src": "profile.ps1", "dest": "C:\WINDOWS\system32\config\systemprofile\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1", "msg": "Set SYSTEM PowerShell profile", "needsAdmin": true}
 
 
 §writeFile {"src": "bashrc.sh", "dest": "$env:USERPROFILE\.bashrc", "msg": "Set .bashrc"}
@@ -301,6 +335,8 @@ try {
     Add-Type -MemberDefinition $code -Namespace SHChange -Name Notify
     [SHChange.Notify]::Refresh()
 } catch {}
+
+if ($applyToDefaultUser) {unloadDefaultUserHives}
 
 if ($needsSignOut) {
     echo "Done! Please restart your computer or sign out and sign back in to apply all changes."

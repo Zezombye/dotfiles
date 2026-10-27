@@ -1,6 +1,6 @@
 {
-        "`$help": "https://aka.ms/terminal-documentation",
-        "`$schema": "https://aka.ms/terminal-profiles-schema",
+        "$help": "https://aka.ms/terminal-documentation",
+        "$schema": "https://aka.ms/terminal-profiles-schema",
         "actions": [],
         "alwaysOnTop": false,
         "alwaysShowTabs": false,
@@ -65,10 +65,10 @@
         "schemes": [{
             "name": "zez.dev",
 
-            "background": "###Color0_hex###",
-            "cursorColor": "###Color7_hex###",
-            "foreground": "###Color7_hex###",
-            "selectionBackground": "###Color7_hex###",
+            "background": "###black###",
+            "cursorColor": "###white###",
+            "foreground": "###white###",
+            "selectionBackground": "###white###",
 
             "black": "###black###",
             "blue": "###blue###",

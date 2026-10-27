@@ -1,4 +1,49 @@
 
+$defaultUserHive = "zez.dev_DefaultUser"
+$defaultUserClassesHive = "zez.dev_DefaultUser_Classes"
+
+function loadDefaultUserHives {
+    $defaultUserProfile = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList").Default
+    $hives = @(
+        @($defaultUserHive, "$defaultUserProfile\NTUSER.DAT"),
+        #HKCU\Software\Classes is stored in UsrClass.dat instead of NTUSER.DAT
+        @($defaultUserClassesHive, "$defaultUserProfile\AppData\Local\Microsoft\Windows\UsrClass.dat")
+    )
+    foreach ($hive in $hives) {
+        #The hive may still be loaded if a previous run was interrupted
+        $key = [Microsoft.Win32.Registry]::Users.OpenSubKey($hive[0])
+        if ($key -ne $null) {
+            $key.Close()
+            continue
+        }
+        reg.exe load "HKU\$($hive[0])" $hive[1] | Out-Null
+        if ($LASTEXITCODE -ne 0) {throw "Failed to load '$($hive[1])' into 'HKU\$($hive[0])'"}
+    }
+}
+
+function unloadDefaultUserHives {
+    #Registry handles must be released before the hives can be unloaded
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+    foreach ($hiveName in @($defaultUserHive, $defaultUserClassesHive)) {
+        $key = [Microsoft.Win32.Registry]::Users.OpenSubKey($hiveName)
+        if ($key -eq $null) {continue}
+        $key.Close()
+        reg.exe unload "HKU\$hiveName" | Out-Null
+        if ($LASTEXITCODE -ne 0) {throw "Failed to unload 'HKU\$hiveName'"}
+    }
+}
+
+function getDefaultUserRegPath {
+    param ([string]$regPath)
+    $regPath = $regPath.Replace("/", "\")
+    if ($regPath -notmatch "^HKCU:") {throw "'$regPath' is not in HKCU"}
+    if ($regPath -match "^HKCU:\\Software\\Classes(\\|$)") {
+        return $regPath -replace "^HKCU:\\Software\\Classes", "HKU:\$defaultUserClassesHive"
+    }
+    return $regPath -replace "^HKCU:", "HKU:\$defaultUserHive"
+}
+
 function grantRegKeyPermissions {
     param ([string]$regPath)
     if (-not $regPath.startswith("HKCR:", "CurrentCultureIgnoreCase")) {
@@ -128,7 +173,8 @@ function applyRegEdits {
     param (
         [string]$Title,
         [Parameter(Mandatory=$true)]
-        [array]$Modifications
+        [array]$Modifications,
+        [switch]$ForDefaultUser
     )
     #Fix for the array unrolling behavior
     if ($modifications[0] -is [string]) {
@@ -273,11 +319,25 @@ function applyRegEdits {
         Write-Host "Already $lowercasePastTenseTitle" -ForegroundColor DarkGray
     }
 
-    if ($areModificationsRequired -and $additionalParams.explorerRestart -eq $true) {
+    if ($areModificationsRequired -and -not $ForDefaultUser -and $additionalParams.explorerRestart -eq $true) {
         $script:needsExplorerRestart = $true
     }
-    if ($areModificationsRequired -and $additionalParams.signout -eq $true) {
+    if ($areModificationsRequired -and -not $ForDefaultUser -and $additionalParams.signout -eq $true) {
         $script:needsSignOut = $true
+    }
+
+    if ($applyToDefaultUser -and -not $ForDefaultUser) {
+        $defaultUserModifications = @()
+        foreach ($mod in $Modifications) {
+            if ($mod[1] -match "^HKCU:") {
+                $defaultUserMod = $mod.Clone()
+                $defaultUserMod[1] = getDefaultUserRegPath $mod[1]
+                $defaultUserModifications += ,$defaultUserMod
+            }
+        }
+        if ($defaultUserModifications.Count -gt 0) {
+            applyRegEdits "$Title for default user" $defaultUserModifications -ForDefaultUser
+        }
     }
 }
 
