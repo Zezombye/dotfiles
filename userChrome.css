@@ -1,0 +1,52 @@
+/* prevent audio playing tabs from modifying tab width */
+.tabbrowser-tab {
+	&:is([muted], [soundplaying], [activemedia-blocked]) {
+		#tabbrowser-tabs[orient="horizontal"] &:not([pinned]) {
+			--tab-min-width: unset !important;
+			min-width: var(--tab-min-width-pref, var(--tab-min-width)) !important;
+		}
+	}
+}
+/* put audio button back above favicon */
+#tabbrowser-tabs:is([orient="vertical"][expanded], [orient="horizontal"]) .tabbrowser-tab:not([pinned]):not([crashed]):is([soundplaying], [muted], [activemedia-blocked]) {
+
+	.tab-audio-button {
+		--button-size-icon-small: 12px !important;
+		--button-min-height-small: 10px !important;
+		margin: 0 !important;
+		transform: translateY(-9px) translateX(-24px);
+		z-index: 9999;
+		--icon-size-default: 9px !important;
+		width: 3.5px !important;
+	}
+	
+	.tab-audio-button::after {
+		width: 11px;
+		display: inline-block;
+		background-color: rgba(0,0,0,0.6);
+		height: 11px;
+		content: "";
+		position: absolute;
+		top: 0;
+		left: 0;
+		margin-top: 1px;
+		z-index: -1;
+		border-radius: 4px;
+		margin-left: 1px;
+	}
+}
+
+/* Set constant tab width. Disabled as I like the current behavior */
+/*.tabbrowser-tab[fadein]:not([pinned]) { 
+	max-width: 140px !important;
+	min-width: 140px !important;
+}*/
+
+/* Display full tab title in preview */
+
+#tab-preview-panel .tab-preview-title {
+	-webkit-line-clamp: none !important;
+}
+
+/* Remove useless "Firefox is on guard" when clicking on shield icon*/
+#trustpanel-graphic-section { display: none !important; }

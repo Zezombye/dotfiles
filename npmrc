@@ -1,0 +1,5 @@
+# Don't install package versions released less than 52 days ago. Needs npm 11.10+, older versions display a warning
+min-release-age=52
+ignore-scripts=true
+# Git dependencies bypass the registry, so min-release-age does not apply to them. Default in npm 12
+allow-git=none

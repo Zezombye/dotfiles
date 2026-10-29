@@ -12,6 +12,21 @@ if (-not (Test-Path "HKCR:")) {
 }
 
 function prompt {
+    #profile.ps1 is also loaded when running scripts (powershell -File/-Command), but prompt is only called in interactive sessions, so terminal-only functions are defined at the first prompt
+    if (-not $global:terminalFunctionsDefined) {
+        $global:terminalFunctionsDefined = $true
+        if (Get-Command git -ErrorAction SilentlyContinue) {
+            #Same as gacp in main.sh
+            function global:gacp {
+                param ([string]$message = "")
+                git add -A
+                #PowerShell 5.1 does not pass empty arguments to native programs, so -m $message would fail with an empty message
+                if ($LASTEXITCODE -eq 0) { git commit --allow-empty-message "--message=$message" }
+                if ($LASTEXITCODE -eq 0) { git push }
+            }
+        }
+    }
+
     $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     #Unlike $env:hostname, the hostname command returns the dns name (which isn't all uppercase)

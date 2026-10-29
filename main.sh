@@ -12,6 +12,7 @@ esac
 
 HISTCONTROL=ignoreboth # don't put duplicate lines or lines starting with space in the history
 shopt -s histappend # append to the history file, don't overwrite it
+#[[ $PROMPT_COMMAND == *"history -a"* ]] || PROMPT_COMMAND="history -a${PROMPT_COMMAND:+; $PROMPT_COMMAND}" # write each command to the history file once it finishes, instead of on exit, so that it is not lost if the terminal is killed - disabled for now for testing
 
 HISTSIZE=1000
 HISTFILESIZE=2000
@@ -44,6 +45,11 @@ fi
 export GCC_COLORS='error=01;31:warning=01;35:note=01;36:caret=01;32:locus=01:quote=01'
 
 alias ll='ls -laF'
+
+#Same as gacp in profile.ps1
+if command -v git >/dev/null; then
+    gacp() { git add -A && git commit --allow-empty-message -m "$1" && git push; }
+fi
 
 if [ -f ~/.bash_aliases ]; then
     . ~/.bash_aliases
@@ -142,3 +148,17 @@ export MYSQL_PS1=$'\001\e[01;35m\002mysql\001\e[0m\002 \001\e[01;32m\002\\u\001\
 #EOF
 
 §writeFile {"src": "vimrc", "dest": "~/.vimrc", "msg": "Added .vimrc"}
+
+#Mitigate supply chain attacks: don't install package versions released less than 52 days ago (most malicious versions are detected and removed by then), and don't run install scripts
+if [[ -z $MSYSTEM ]]; then
+    #If the config file already exists, use the program to edit it, keeping the other settings (eg auth tokens)
+    #The global npm config is usually only writable by root. For pnpm, --location=global is the config of the current user
+    §writeFile {"src": "npmrc", "dest": "~/.npmrc", "msg": "Set npm security settings", "command": "npm", "ifAlreadyExists": ["npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=user", "[[ $EUID -ne 0 ]] || npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=global"]}
+    #pnpm 11+ reads its settings from config.yaml instead of rc. If config.yaml does not exist, pnpm 10 is presumably installed, so set the settings in rc with the commands
+    #config.yaml is still written, so that the commands are not run again and pnpm is configured once upgraded
+    if command -v pnpm >/dev/null; then
+        §writeFile {"src": "pnpm_config.yaml", "dest": "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml", "msg": "Set pnpm security settings", "ifAlreadyExists": ["pnpm config set minimumReleaseAge 74880 --location=global", "pnpm config set ignoreScripts true --location=global", "pnpm config set trustPolicy no-downgrade --location=global"], "ifNotExists": ["pnpm config set minimum-release-age 74880 --location=global", "pnpm config set trust-policy no-downgrade --location=global", "pnpm config set block-exotic-subdeps true --location=global"]}
+    fi
+    §writeFile {"src": "uv.toml", "dest": "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml", "msg": "Set uv security settings", "command": "uv"}
+    §writeFile {"src": "bunfig.toml", "dest": "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml", "msg": "Set bun security settings", "command": "bun"}
+fi

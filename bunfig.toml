@@ -1,0 +1,4 @@
+[install]
+# Don't install package versions released less than 52 days ago (in seconds)
+minimumReleaseAge = 4492800
+ignoreScripts = true

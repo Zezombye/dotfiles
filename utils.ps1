@@ -44,6 +44,23 @@ function getDefaultUserRegPath {
     return $regPath -replace "^HKCU:", "HKU:\$defaultUserHive"
 }
 
+#Processes for which the user chose to continue while they are running, so that they are not asked again
+$ignoredRunningProcesses = @()
+
+function promptCloseProcess {
+    #Returns $true if the process is not running (asking the user to close it if it is), $false if the user chose to continue while it is running
+    param ([string]$processName)
+    while (Get-Process -Name $processName -ErrorAction SilentlyContinue) {
+        if ($processName -in $script:ignoredRunningProcesses) {return $false}
+        $answer = Read-Host "$processName.exe is running, settings cannot be edited. Continue anyway? [y/N]"
+        if ($answer -in @("y", "yes")) {
+            $script:ignoredRunningProcesses += $processName
+            return $false
+        }
+    }
+    return $true
+}
+
 function grantRegKeyPermissions {
     param ([string]$regPath)
     if (-not $regPath.startswith("HKCR:", "CurrentCultureIgnoreCase")) {

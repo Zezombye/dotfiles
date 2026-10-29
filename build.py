@@ -3,11 +3,15 @@
 Directives, which must be alone on their line:
 - §include <file>: replaced by the content of <file> (relative to this directory).
 - §writeFile {json}: replaced by code that writes the file "src" (embedded in base64) to "dest", unless "dest" already exists and is more recent than "src".
-    - "msg": message displayed when writing the file, in past tense (eg "Added .vimrc"). Also used for the "Already ..." and "Cannot ..., needs admin rights" messages.
+    - "dest": in windows-setup.ps1, PowerShell variables are expanded (eg $env:APPDATA).
+    - "msg": message displayed when writing the file, in past tense (eg "Added .vimrc"). Also used for the "Already ..." and "Cannot ..., needs admin rights" messages. In windows-setup.ps1, PowerShell variables are expanded.
     - "command" (optional): only write the file if this command exists.
     - "needsAdmin" (optional): only write the file if running as admin (root for bash).
     - "applyConfigValues" (optional): replace ###key### placeholders in "src" with the values of config.json.
+    - "replace" (optional): {"old": "new"} strings to replace in "src" (eg to reuse a file with another syntax). Each "old" string must be in "src".
     - "defaultUser" (optional, true by default): in windows-setup.ps1, destinations in $env:USERPROFILE, $env:APPDATA or $env:LOCALAPPDATA are also written to the default user profile if $applyToDefaultUser.
+    - "ifAlreadyExists" (optional): if "dest" already exists (and is older than "src"), run these commands instead of replacing it (eg to edit a config file with the program it belongs to, keeping the other settings). They must modify "dest", so that they are not run again. Not used for the default user, whose file is replaced.
+    - "ifNotExists" (optional): if "dest" does not exist, run these commands before writing it (eg to configure an older version of the program, which uses another file). Not used for the default user.
     - .klc files are compiled to a keyboard layout dll with Microsoft Keyboard Layout Creator.
     - Backslashes are literal, so that Windows paths can be written as is.
 
@@ -32,7 +36,7 @@ KBDUTOOL = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) 
 
 DIRECTIVE_RE = re.compile(r"^(\s*)§(\w+) (.*)$")
 PLACEHOLDER_RE = re.compile(r"###(\w+)###")
-WRITE_FILE_KEYS = {"src", "dest", "msg", "command", "needsAdmin", "applyConfigValues", "defaultUser"}
+WRITE_FILE_KEYS = {"src", "dest", "msg", "command", "needsAdmin", "applyConfigValues", "replace", "defaultUser", "ifAlreadyExists", "ifNotExists"}
 DEFAULT_USER_DEST_RE = re.compile(r"^\$env:(USERPROFILE|APPDATA|LOCALAPPDATA)(?=\\)", re.IGNORECASE)
 DEFAULT_USER_FOLDERS = {"USERPROFILE": "", "APPDATA": r"\AppData\Roaming", "LOCALAPPDATA": r"\AppData\Local"}
 # Used to turn the "msg" of §writeFile into "Cannot <verb> ..., needs admin rights". Add verbs as needed.
@@ -88,7 +92,27 @@ def ps_quote(s):
     return "'" + s.replace("'", "''") + "'"
 
 
-def write_file_bash(dest, content_b64, mtime, msg, command, needs_admin):
+def ps_dquote(s):
+    # Double-quoted so that variables are expanded
+    return '"' + s.replace("`", "``").replace('"', '`"') + '"'
+
+
+def sh_run_commands(commands):
+    # Braces so that commands containing || are not mixed with the &&
+    return " && ".join(f"{{ {command}; }}" for command in commands)
+
+
+def ps_run_commands(commands):
+    lines = []
+    for command in commands:
+        lines += [
+            f"    {command}",
+            f"    if ($LASTEXITCODE -ne 0) {{throw {ps_quote('Failed to run: ' + command)}}}",
+        ]
+    return lines
+
+
+def write_file_bash(dest, content_b64, mtime, msg, command, needs_admin, if_already_exists, if_not_exists):
     dest = '"' + re.sub(r"^~/", "$HOME/", dest) + '"'
     lines = [
         f"if [[ -f {dest} ]] && [[ $(stat -c %Y {dest}) -ge {mtime} ]]; then",
@@ -104,38 +128,55 @@ def write_file_bash(dest, content_b64, mtime, msg, command, needs_admin):
             f"elif ! command -v {sh_quote(command)} >/dev/null; then",
             f"    : # {command} is not installed",
         ]
-    lines += [
-        "else",
-        f'    mkdir -p "$(dirname {dest})"',
-        f"    echo '{content_b64}' | base64 -d > {dest}",
-        f"    echo {sh_quote('[.bashrc] ' + msg)}",
-        "fi",
+    if if_already_exists:
+        lines += [
+            f"elif [[ -f {dest} ]]; then",
+            f"    {sh_run_commands(if_already_exists)} && echo {sh_quote('[.bashrc] ' + msg)}",
+        ]
+    write_lines = [
+        f'mkdir -p "$(dirname {dest})"',
+        f"echo '{content_b64}' | base64 -d > {dest}",
+        f"echo {sh_quote('[.bashrc] ' + msg)}",
     ]
+    lines += ["else"]
+    if if_not_exists:
+        lines += [f"    if {sh_run_commands(if_not_exists)}; then", *["        " + line for line in write_lines], "    fi"]
+    else:
+        lines += ["    " + line for line in write_lines]
+    lines += ["fi"]
     return lines
 
 
-def write_file_ps1(dest, mtime, msg, command, needs_admin):
+def write_file_ps1(dest, mtime, msg, command, needs_admin, if_already_exists, if_not_exists):
     # The content is in $writeFileContent, so that it is not duplicated for the default user
+    # [IO.File]::Exists returns false when access is denied (eg the SYSTEM profile without admin rights), whereas Test-Path throws
     lines = [
         f'$writeFileDest = "{dest}"',
-        f"if ((Test-Path -LiteralPath $writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds({mtime}).UtcDateTime) {{",
-        f"    Write-Host {ps_quote('Already ' + msg[0].lower() + msg[1:])} -ForegroundColor DarkGray",
+        f"if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds({mtime}).UtcDateTime) {{",
+        f"    Write-Host {ps_dquote('Already ' + msg[0].lower() + msg[1:])} -ForegroundColor DarkGray",
     ]
     if needs_admin:
         lines += [
             "} elseif (-not $isAdmin) {",
-            f"    Write-Host {ps_quote(f'Cannot {present_tense(msg)}, needs admin rights')} -ForegroundColor Yellow",
+            f"    Write-Host {ps_dquote(f'Cannot {present_tense(msg)}, needs admin rights')} -ForegroundColor Yellow",
         ]
     if command:
         lines += [
             f"}} elseif (-not (Get-Command {ps_quote(command)} -ErrorAction SilentlyContinue)) {{",
             f"    # {command} is not installed",
         ]
+    if if_already_exists:
+        lines += [
+            "} elseif ([IO.File]::Exists($writeFileDest)) {",
+            *ps_run_commands(if_already_exists),
+            f"    echo {ps_dquote(msg)}",
+        ]
     lines += [
         "} else {",
+        *ps_run_commands(if_not_exists or []),
         "    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null",
         "    [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)",
-        f"    echo {ps_quote(msg)}",
+        f"    echo {ps_dquote(msg)}",
         "}",
     ]
     return lines
@@ -153,24 +194,33 @@ def write_file(arg, lang, origin, inputs):
     mtime = src.stat().st_mtime
     if src.suffix == ".klc":
         content = compile_klc(src).read_bytes()
-    elif args.get("applyConfigValues"):
-        content = apply_config_values(read_text(src), src.name, inputs).encode("utf-8")
-        mtime = max(mtime, CONFIG_PATH.stat().st_mtime)
+    elif args.get("applyConfigValues") or args.get("replace"):
+        text = read_text(src)
+        if args.get("applyConfigValues"):
+            text = apply_config_values(text, src.name, inputs)
+            mtime = max(mtime, CONFIG_PATH.stat().st_mtime)
+        for old, new in args.get("replace", {}).items():
+            if old not in text:
+                raise ValueError(f"'{old}' of §writeFile replace not found in {src.name}")
+            text = text.replace(old, new)
+        content = text.encode("utf-8")
     else:
         content = src.read_bytes()
 
     dest, msg, command, needs_admin = args["dest"], args["msg"], args.get("command"), args.get("needsAdmin", False)
+    if_already_exists, if_not_exists = args.get("ifAlreadyExists"), args.get("ifNotExists")
     content_b64 = base64.b64encode(content).decode("ascii")
     if lang == "bash":
-        return write_file_bash(dest, content_b64, int(mtime), msg, command, needs_admin)
+        return write_file_bash(dest, content_b64, int(mtime), msg, command, needs_admin, if_already_exists, if_not_exists)
 
     lines = [f"$writeFileContent = [Convert]::FromBase64String('{content_b64}')"]
-    lines += write_file_ps1(dest, int(mtime), msg, command, needs_admin)
+    lines += write_file_ps1(dest, int(mtime), msg, command, needs_admin, if_already_exists, if_not_exists)
     match = DEFAULT_USER_DEST_RE.match(dest)
     if match and args.get("defaultUser", True):
         default_user_dest = "$defaultUserProfile" + DEFAULT_USER_FOLDERS[match.group(1).upper()] + dest[match.end():]
         lines.append("if ($applyToDefaultUser) {")
-        lines += ["    " + line for line in write_file_ps1(default_user_dest, int(mtime), msg + " for default user", command, needs_admin)]
+        # The commands would edit the config of the current user
+        lines += ["    " + line for line in write_file_ps1(default_user_dest, int(mtime), msg + " for default user", command, needs_admin, None, None)]
         lines.append("}")
     return lines
 

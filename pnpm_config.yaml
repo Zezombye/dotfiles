@@ -1,0 +1,5 @@
+# Don't install package versions released less than 52 days ago (in minutes)
+minimumReleaseAge: 74880
+ignoreScripts: true
+# Fail if a package version is published with less trust evidence (eg without provenance) than the previous versions, which is typical of stolen tokens
+trustPolicy: no-downgrade

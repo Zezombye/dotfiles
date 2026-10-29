@@ -3,7 +3,14 @@ function setExplorerQuickAccessRibbon {
     $path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Ribbon'
     $valueName = 'QatItems'
 
-    $raw = (Get-ItemProperty -Path $path -Name $valueName).$valueName
+    $raw = $null
+    if (Test-Path -LiteralPath $path) {
+        $raw = (Get-Item -LiteralPath $path).GetValue($valueName)
+    }
+    if ($null -eq $raw) {
+        #The value is only created once the toolbar is customized, so start from the default one (undo, redo, delete and rename hidden, properties and new folder shown)
+        $raw = [Text.Encoding]::UTF8.GetBytes('<siq:customUI xmlns:siq="http://schemas.microsoft.com/windows/2009/ribbon/qat"><siq:ribbon minimized="true"><siq:qat position="0"><siq:sharedControls><siq:control idQ="siq:16128" visible="false" argument="0" /><siq:control idQ="siq:16129" visible="false" argument="0" /><siq:control idQ="siq:12352" visible="false" argument="0" /><siq:control idQ="siq:12384" visible="true" argument="0" /><siq:control idQ="siq:12336" visible="true" argument="0" /><siq:control idQ="siq:12357" visible="false" argument="0" /></siq:sharedControls></siq:qat></siq:ribbon></siq:customUI>')
+    }
     $xmlText = [Text.Encoding]::UTF8.GetString($raw)
     [xml]$xml = $xmlText
     $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)

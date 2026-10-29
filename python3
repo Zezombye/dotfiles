@@ -1,0 +1,3 @@
+#!/bin/sh
+# python3 alias for git bash, as Python on Windows only provides python.exe
+exec python "$@"

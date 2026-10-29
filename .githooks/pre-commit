@@ -8,5 +8,5 @@ git add bashrc.sh windows-setup.ps1 keyboard.dll
 cp bashrc.sh windows-setup.ps1 ../blog/articles/public/
 cd ../blog
 git add articles/public/windows-setup.ps1 articles/public/bashrc.sh
-git commit -m "update setup scripts"
-git push
+#git commit -m "update setup scripts"
+#git push

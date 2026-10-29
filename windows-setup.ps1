@@ -1,4 +1,4 @@
-# Version: 2026-10-27
+# Version: 2026-10-29
 # irm zez.dev | iex
 
 echo ""
@@ -13,6 +13,15 @@ echo ""
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+trap {
+    Write-Host ($_ | Out-String) -ForegroundColor Red
+    #A loaded hive locks the default profile files. Unloaded before the pause, in case the console is closed during it
+    if ($applyToDefaultUser) {
+        try {unloadDefaultUserHives} catch {Write-Host ($_ | Out-String) -ForegroundColor Red}
+    }
+    Read-Host "Press Enter to exit"
+    break
+}
 
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 
@@ -37,6 +46,20 @@ if ($isAdmin) {echo "Running as Administrator"} else {echo "Running as standard 
 
 $isWindows11 = ((Get-CimInstance -ClassName Win32_OperatingSystem).Version -ge "10.0.22000")
 if ($isWindows11) {echo "Detected Windows 11"} else {echo "Detected Windows 10 or lower"}
+
+#Allow running local scripts (eg the npm.ps1 and pnpm.ps1 shims), for all users if admin, else for the current user
+$executionPolicyScope, $executionPolicySuffix = if ($isAdmin) {"LocalMachine", ""} else {"CurrentUser", " for current user"}
+if ((Get-ExecutionPolicy -Scope $executionPolicyScope) -in @("RemoteSigned", "Unrestricted", "Bypass")) {
+    Write-Host "Already allowed PowerShell scripts$executionPolicySuffix" -ForegroundColor DarkGray
+} else {
+    try {
+        Set-ExecutionPolicy RemoteSigned -Scope $executionPolicyScope -Force
+    } catch {
+        #Thrown although the policy is set, if a more specific scope overrides it (eg -ExecutionPolicy Bypass when relaunched as admin)
+        if ($_.FullyQualifiedErrorId -notlike "ExecutionPolicyOverride,*") {throw}
+    }
+    echo "Allowed PowerShell scripts$executionPolicySuffix"
+}
 
 $needsExplorerRestart = $false
 $needsSignOut = $false
@@ -89,6 +112,23 @@ function getDefaultUserRegPath {
         return $regPath -replace "^HKCU:\\Software\\Classes", "HKU:\$defaultUserClassesHive"
     }
     return $regPath -replace "^HKCU:", "HKU:\$defaultUserHive"
+}
+
+#Processes for which the user chose to continue while they are running, so that they are not asked again
+$ignoredRunningProcesses = @()
+
+function promptCloseProcess {
+    #Returns $true if the process is not running (asking the user to close it if it is), $false if the user chose to continue while it is running
+    param ([string]$processName)
+    while (Get-Process -Name $processName -ErrorAction SilentlyContinue) {
+        if ($processName -in $script:ignoredRunningProcesses) {return $false}
+        $answer = Read-Host "$processName.exe is running, settings cannot be edited. Continue anyway? [y/N]"
+        if ($answer -in @("y", "yes")) {
+            $script:ignoredRunningProcesses += $processName
+            return $false
+        }
+    }
+    return $true
 }
 
 function grantRegKeyPermissions {
@@ -677,11 +717,6 @@ if ($isAdmin) {
 if ($applyToDefaultUser) {
     loadDefaultUserHives
 }
-#Make sure the default user hives are unloaded if the script crashes, as a loaded hive locks the default profile files
-trap {
-    if ($applyToDefaultUser) {unloadDefaultUserHives}
-    break
-}
 
 
 # Taskbar
@@ -965,7 +1000,14 @@ function setExplorerQuickAccessRibbon {
     $path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Ribbon'
     $valueName = 'QatItems'
 
-    $raw = (Get-ItemProperty -Path $path -Name $valueName).$valueName
+    $raw = $null
+    if (Test-Path -LiteralPath $path) {
+        $raw = (Get-Item -LiteralPath $path).GetValue($valueName)
+    }
+    if ($null -eq $raw) {
+        #The value is only created once the toolbar is customized, so start from the default one (undo, redo, delete and rename hidden, properties and new folder shown)
+        $raw = [Text.Encoding]::UTF8.GetBytes('<siq:customUI xmlns:siq="http://schemas.microsoft.com/windows/2009/ribbon/qat"><siq:ribbon minimized="true"><siq:qat position="0"><siq:sharedControls><siq:control idQ="siq:16128" visible="false" argument="0" /><siq:control idQ="siq:16129" visible="false" argument="0" /><siq:control idQ="siq:12352" visible="false" argument="0" /><siq:control idQ="siq:12384" visible="true" argument="0" /><siq:control idQ="siq:12336" visible="true" argument="0" /><siq:control idQ="siq:12357" visible="false" argument="0" /></siq:sharedControls></siq:qat></siq:ribbon></siq:customUI>')
+    }
     $xmlText = [Text.Encoding]::UTF8.GetString($raw)
     [xml]$xml = $xmlText
     $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
@@ -1021,12 +1063,24 @@ if ($isWindows11) {
     #Not applied to the default user, as AppData\Local\Packages is created when the apps are installed for a new user, and pre-creating it may break that
     $writeFileContent = [Convert]::FromBase64String('ewogICAgICAgICIkaGVscCI6ICJodHRwczovL2FrYS5tcy90ZXJtaW5hbC1kb2N1bWVudGF0aW9uIiwKICAgICAgICAiJHNjaGVtYSI6ICJodHRwczovL2FrYS5tcy90ZXJtaW5hbC1wcm9maWxlcy1zY2hlbWEiLAogICAgICAgICJhY3Rpb25zIjogW10sCiAgICAgICAgImFsd2F5c09uVG9wIjogZmFsc2UsCiAgICAgICAgImFsd2F5c1Nob3dUYWJzIjogZmFsc2UsCiAgICAgICAgImNvcHlGb3JtYXR0aW5nIjogIm5vbmUiLAogICAgICAgICJjb3B5T25TZWxlY3QiOiBmYWxzZSwKICAgICAgICAiZGVmYXVsdFByb2ZpbGUiOiAiezYxYzU0YmJkLWMyYzYtNTI3MS05NmU3LTAwOWE4N2ZmNDRiZn0iLAogICAgICAgICJpbml0aWFsUm93cyI6IDM0LAogICAgICAgICJrZXliaW5kaW5ncyI6IFt7CiAgICAgICAgICAgICJpZCI6ICJUZXJtaW5hbC5Db3B5VG9DbGlwYm9hcmQiLAogICAgICAgICAgICAia2V5cyI6ICJjdHJsK2MiCiAgICAgICAgfSx7CiAgICAgICAgICAgICJpZCI6ICJUZXJtaW5hbC5QYXN0ZUZyb21DbGlwYm9hcmQiLAogICAgICAgICAgICAia2V5cyI6ICJjdHJsK3YiCiAgICAgICAgfSx7CiAgICAgICAgICAgICJpZCI6ICJUZXJtaW5hbC5EdXBsaWNhdGVQYW5lQXV0byIsCiAgICAgICAgICAgICJrZXlzIjogImFsdCtzaGlmdCtkIgogICAgICAgIH1dLAogICAgICAgICJuZXdUYWJNZW51IjogW3sKICAgICAgICAgICAgInR5cGUiOiAicmVtYWluaW5nUHJvZmlsZXMiCiAgICAgICAgfV0sCiAgICAgICAgIm5ld1RhYlBvc2l0aW9uIjogImFmdGVyQ3VycmVudFRhYiIsCiAgICAgICAgInByb2ZpbGVzIjogewogICAgICAgICAgICAiZGVmYXVsdHMiOiB7CiAgICAgICAgICAgICAgICAiYW50aWFsaWFzaW5nTW9kZSI6ICJjbGVhcnR5cGUiLAogICAgICAgICAgICAgICAgImJlbGxTb3VuZCI6IFsiQzpcXFdpbmRvd3NcXE1lZGlhXFxXaW5kb3dzIERlZmF1bHQud2F2Il0sCiAgICAgICAgICAgICAgICAiY29sb3JTY2hlbWUiOiAiemV6LmRldiIsCiAgICAgICAgICAgICAgICAiZm9udCI6IHsKICAgICAgICAgICAgICAgICAgICAiY2VsbEhlaWdodCI6ICIxLjEiLAogICAgICAgICAgICAgICAgICAgICJmYWNlIjogIkNvbnNvbGFzIiwKICAgICAgICAgICAgICAgICAgICAic2l6ZSI6IDExLAogICAgICAgICAgICAgICAgICAgICJ3ZWlnaHQiOiAibm9ybWFsIgogICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICJvcGFjaXR5IjogMTAwLAogICAgICAgICAgICAgICAgInBhZGRpbmciOiAiMiIsCiAgICAgICAgICAgICAgICAidXNlQWNyeWxpYyI6IGZhbHNlCiAgICAgICAgICAgIH0sCiAgICAgICAgICAgICJsaXN0IjogW3sKICAgICAgICAgICAgICAgICJjb21tYW5kbGluZSI6ICIlU3lzdGVtUm9vdCVcXFN5c3RlbTMyXFxjbWQuZXhlIiwKICAgICAgICAgICAgICAgICJndWlkIjogInswY2FhMGRhZC0zNWJlLTVmNTYtYThmZi1hZmNlZWVhYTYxMDF9IiwKICAgICAgICAgICAgICAgICJoaWRkZW4iOiBmYWxzZSwKICAgICAgICAgICAgICAgICJuYW1lIjogIkludml0ZSBkZSBjb21tYW5kZXMiCiAgICAgICAgICAgIH0sewogICAgICAgICAgICAgICAgImNvbW1hbmRsaW5lIjogIiVTeXN0ZW1Sb290JVxcU3lzdGVtMzJcXFdpbmRvd3NQb3dlclNoZWxsXFx2MS4wXFxwb3dlcnNoZWxsLmV4ZSIsCiAgICAgICAgICAgICAgICAiZ3VpZCI6ICJ7NjFjNTRiYmQtYzJjNi01MjcxLTk2ZTctMDA5YTg3ZmY0NGJmfSIsCiAgICAgICAgICAgICAgICAiaGlkZGVuIjogZmFsc2UsCiAgICAgICAgICAgICAgICAibmFtZSI6ICJXaW5kb3dzIFBvd2VyU2hlbGwiCiAgICAgICAgICAgIH0sewogICAgICAgICAgICAgICAgImFsdEdyQWxpYXNpbmciOiB0cnVlLAogICAgICAgICAgICAgICAgImNsb3NlT25FeGl0IjogImF1dG9tYXRpYyIsCiAgICAgICAgICAgICAgICAiY29tbWFuZGxpbmUiOiAiJVN5c3RlbVJvb3QlXFxTeXN0ZW0zMlxcV2luZG93c1Bvd2VyU2hlbGxcXHYxLjBcXHBvd2Vyc2hlbGwuZXhlIiwKICAgICAgICAgICAgICAgICJjdXJzb3JTaGFwZSI6ICJiYXIiLAogICAgICAgICAgICAgICAgImVsZXZhdGUiOiB0cnVlLAogICAgICAgICAgICAgICAgImd1aWQiOiAiezgxOTM5M2NhLWM4ZGUtNDQzYy05NWMwLWY1MGI2Y2ViMGZlNH0iLAogICAgICAgICAgICAgICAgImhpZGRlbiI6IGZhbHNlLAogICAgICAgICAgICAgICAgImhpc3RvcnlTaXplIjogOTAwMSwKICAgICAgICAgICAgICAgICJpY29uIjogIm1zLWFwcHg6Ly8vUHJvZmlsZUljb25zL3s2MWM1NGJiZC1jMmM2LTUyNzEtOTZlNy0wMDlhODdmZjQ0YmZ9LnBuZyIsCiAgICAgICAgICAgICAgICAibmFtZSI6ICJXaW5kb3dzIFBvd2VyU2hlbGwgKEFkbWluKSIsCiAgICAgICAgICAgICAgICAic25hcE9uSW5wdXQiOiB0cnVlLAogICAgICAgICAgICAgICAgInN0YXJ0aW5nRGlyZWN0b3J5IjogIiVVU0VSUFJPRklMRSUiCiAgICAgICAgICAgIH1dCiAgICAgICAgfSwKICAgICAgICAic2NoZW1lcyI6IFt7CiAgICAgICAgICAgICJuYW1lIjogInplei5kZXYiLAoKICAgICAgICAgICAgImJhY2tncm91bmQiOiAiIzE4MTgxOCIsCiAgICAgICAgICAgICJjdXJzb3JDb2xvciI6ICIjRDdEN0Q3IiwKICAgICAgICAgICAgImZvcmVncm91bmQiOiAiI0Q3RDdENyIsCiAgICAgICAgICAgICJzZWxlY3Rpb25CYWNrZ3JvdW5kIjogIiNEN0Q3RDciLAoKICAgICAgICAgICAgImJsYWNrIjogIiMxODE4MTgiLAogICAgICAgICAgICAiYmx1ZSI6ICIjNDk4OUUyIiwKICAgICAgICAgICAgImdyZWVuIjogIiM0MEM3M0QiLAogICAgICAgICAgICAiY3lhbiI6ICIjMTFBOENEIiwKICAgICAgICAgICAgInJlZCI6ICIjQ0QzMTMxIiwKICAgICAgICAgICAgInB1cnBsZSI6ICIjQ0E1QUNBIiwKICAgICAgICAgICAgInllbGxvdyI6ICIjRTVFNTEwIiwKICAgICAgICAgICAgIndoaXRlIjogIiNEN0Q3RDciLAogICAgICAgICAgICAiYnJpZ2h0QmxhY2siOiAiIzk2OTY5NiIsCiAgICAgICAgICAgICJicmlnaHRCbHVlIjogIiM0QTk4RjUiLAogICAgICAgICAgICAiYnJpZ2h0R3JlZW4iOiAiIzQ2Q0U0NiIsCiAgICAgICAgICAgICJicmlnaHRDeWFuIjogIiMyOUI4REIiLAogICAgICAgICAgICAiYnJpZ2h0UmVkIjogIiNGMTRDNEMiLAogICAgICAgICAgICAiYnJpZ2h0UHVycGxlIjogIiNENjcwRDYiLAogICAgICAgICAgICAiYnJpZ2h0WWVsbG93IjogIiNGNUY1NDMiLAogICAgICAgICAgICAiYnJpZ2h0V2hpdGUiOiAiI0YyRjJGMiIKICAgICAgICB9XSwKICAgICAgICAic2hvd1RhYnNJblRpdGxlYmFyIjogZmFsc2UsCiAgICAgICAgInRhYldpZHRoTW9kZSI6ICJ0aXRsZUxlbmd0aCIsCiAgICAgICAgInRoZW1lcyI6IFtdLAogICAgICAgICJ1c2VBY3J5bGljSW5UYWJSb3ciOiBmYWxzZSwKICAgICAgICAid2FybmluZy5jb25maXJtQ2xvc2VBbGxUYWJzIjogZmFsc2UKICAgIH0K')
     $writeFileDest = "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"
-    if ((Test-Path -LiteralPath $writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793085204).UtcDateTime) {
-        Write-Host 'Already applied Windows Terminal settings' -ForegroundColor DarkGray
+    if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793187781).UtcDateTime) {
+        Write-Host "Already applied Windows Terminal settings" -ForegroundColor DarkGray
     } else {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
         [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
-        echo 'Applied Windows Terminal settings'
+        echo "Applied Windows Terminal settings"
+    }
+}
+
+#Remove the app execution aliases that shadow the programs in the PATH: python.exe and python3.exe open the Microsoft Store, bash.exe launches WSL
+foreach ($appAlias in @("bash.exe", "python.exe", "python3.exe")) {
+    $appAliasPath = "$env:LOCALAPPDATA\Microsoft\WindowsApps\$appAlias"
+    #The aliases are reparse points, use .NET as PowerShell may try to follow them
+    if ([IO.File]::Exists($appAliasPath)) {
+        [IO.File]::Delete($appAliasPath)
+        echo "Removed $appAlias app execution alias"
+    } else {
+        Write-Host "Already removed $appAlias app execution alias" -ForegroundColor DarkGray
     }
 }
 
@@ -1095,143 +1149,82 @@ function setRegistryFavorites {
         "HKCR:\Local Settings",
         "HKCR:\SystemFileAssociations",
 
+        "HKCU:",
         "HKCU:\Software\Microsoft\Windows\CurrentVersion",
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer",
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies",
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
 
+        "HKLM:",
         "HKLM:\Software\Microsoft\Windows\CurrentVersion",
         "HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer",
         "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies",
         "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run",
         "HKLM:\Software\Microsoft\Windows NT\CurrentVersion",
+
         "HKLM:\System\CurrentControlSet",
         "HKLM:\System\CurrentControlSet\Control\Session Manager\Environment"
     )
+    $hiveNames = @{HKCR = "HKEY_CLASSES_ROOT"; HKCU = "HKEY_CURRENT_USER"; HKLM = "HKEY_LOCAL_MACHINE"; HKU = "HKEY_USERS"}
+    #Favorites are grouped by the first pattern their regedit path matches, with a separator between groups. Favorites added in regedit start with "Computer\" (localized)
+    $groupPatterns = @(
+        "^([^\\]+\\)?HKEY_CLASSES_ROOT",
+        "^([^\\]+\\)?HKEY_CURRENT_USER",
+        "^([^\\]+\\)?HKEY_LOCAL_MACHINE(?!\\SYSTEM(\\|$))",
+        "^([^\\]+\\)?HKEY_LOCAL_MACHINE\\SYSTEM",
+        "^([^\\]+\\)?HKEY_USERS",
+        ""
+    )
+    function getFavoriteGroup {
+        param ([string]$regeditPath)
+        for ($i = 0; $i -lt $groupPatterns.Count; $i++) {
+            if ($regeditPath -match $groupPatterns[$i]) {return $i}
+        }
+    }
 
-    if (-not (Test-Path $favoritesPath)) {
+    if (-not (Test-Path -LiteralPath $favoritesPath)) {
         New-Item -Path $favoritesPath -Force | Out-Null
     }
-    $existingProps = Get-ItemProperty $favoritesPath
-    $existingFavorites = @{}
-    
-    foreach ($prop in $existingProps.PSObject.Properties) {
-        if ($prop.Name -notin @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider")) {
-            $existingFavorites[$prop.Name] = $prop.Value
+    $key = Get-Item -LiteralPath $favoritesPath
+    #Name -> regedit path
+    $allFavorites = @{}
+    foreach ($name in $key.GetValueNames()) {
+        #Separators are recreated below
+        if ($name -notmatch "^ +$") {$allFavorites[$name] = $key.GetValue($name)}
+    }
+    foreach ($favorite in $favorites) {
+        $hive, $subKeyPath = $favorite -split ":", 2
+        $allFavorites[$favorite] = $hiveNames[$hive] + $subKeyPath
+    }
+
+    #Replace spaces with "~" so that "Windows NT\" comes after "Windows\"
+    $sortedNames = $allFavorites.Keys | Sort-Object {getFavoriteGroup $allFavorites[$_]}, {$_.Replace(" ", "~")}
+    $newFavorites = [ordered]@{}
+    $nbSeparators = 0
+    $previousGroup = $null
+    foreach ($name in $sortedNames) {
+        $group = getFavoriteGroup $allFavorites[$name]
+        if ($null -ne $previousGroup -and $group -ne $previousGroup) {
+            #Separators are favorites named with spaces, as names must be unique
+            $nbSeparators++
+            $newFavorites[" " * $nbSeparators] = ""
         }
+        $newFavorites[$name] = $allFavorites[$name]
+        $previousGroup = $group
     }
 
-    function Get-RegeditPath {
-        param([string]$path)
-        $path = $path -replace '^HKLM:\\', 'HKEY_LOCAL_MACHINE\'
-        $path = $path -replace '^HKCU:\\', 'HKEY_CURRENT_USER\'
-        $path = $path -replace '^HKCR:\\', 'HKEY_CLASSES_ROOT\'
-        $path = $path -replace '^HKU:\\',  'HKEY_USERS\'
-        return $path
-    }
-
-    $allItems = [System.Collections.ArrayList]::new()
-
-    foreach ($name in $existingFavorites.Keys) {
-        $val = $existingFavorites[$name]
-        $hive = "Other"
-        
-        if ($name -match "^HKCR:\\") { $hive = "HKCR" }
-        elseif ($name -match "^HKCU:\\") { $hive = "HKCU" }
-        elseif ($name -match "^HKLM:\\") { $hive = "HKLM" }
-        elseif ($name -match "^HKU:\\")  { $hive = "HKU" }
-        #Remove existing separators
-        if ($name -match "^ +$") { continue }
-        
-        $allItems.Add([PSCustomObject]@{
-            Name  = $name
-            Value = $val
-            Hive  = $hive
-        }) | Out-Null
-    }
-
-    $nbAddedFavorites = 0
-    foreach ($favPath in $favorites) {
-        $alreadyExists = $allItems | Where-Object { $_.Name -eq $favPath }
-        
-        if (-not $alreadyExists) {
-            $regVal = Get-RegeditPath -path $favPath
-            
-            $hive = "Other"
-            if ($favPath -match "^HKCR:\\") { $hive = "HKCR" }
-            elseif ($favPath -match "^HKCU:\\") { $hive = "HKCU" }
-            elseif ($favPath -match "^HKLM:\\") { $hive = "HKLM" }
-            elseif ($favPath -match "^HKU:\\")  { $hive = "HKU" }
-
-            $allItems.Add([PSCustomObject]@{
-                Name  = $favPath
-                Value = $regVal
-                Hive  = $hive
-            }) | Out-Null
-            $nbAddedFavorites++ | Out-Null
-        }
-    }
-
-    if ($nbAddedFavorites -eq 0) {
-        Write-Host "Already added Regedit favorites$titleSuffix" -ForegroundColor DarkGray
+    $existingText = ($key.GetValueNames() | ForEach-Object {"$_=$($key.GetValue($_))"}) -join "`n"
+    $newText = ($newFavorites.GetEnumerator() | ForEach-Object {"$($_.Key)=$($_.Value)"}) -join "`n"
+    if ($newText -eq $existingText) {
+        Write-Host "Already set Regedit favorites$titleSuffix" -ForegroundColor DarkGray
         return
     }
-
-    #Order all favorites
-    #Replace space with "~" so that "Windows NT\" comes after "Windows\"
-    $sortExpr = @{ Expression = { $_.Name.Replace(' ', '~') } }
-    $bucketHKCR = $allItems | Where-Object { $_.Hive -eq "HKCR" } | Sort-Object $sortExpr
-    $bucketHKCU = $allItems | Where-Object { $_.Hive -eq "HKCU" } | Sort-Object $sortExpr
-    $bucketHKLM = $allItems | Where-Object { $_.Hive -eq "HKLM" } | Sort-Object $sortExpr
-    $bucketHKU  = $allItems | Where-Object { $_.Hive -eq "HKU" }  | Sort-Object $sortExpr
-    $bucketOther= $allItems | Where-Object { $_.Hive -eq "Other" }| Sort-Object $sortExpr
-
-    $global:spaceCounter = 1
-    function Get-Separator {
-        $sep = " " * $global:spaceCounter
-        $global:spaceCounter++
-        return [PSCustomObject]@{ Name = $sep; Value = "" }
-    }
-    $finalList = @()
-
-    if ($bucketHKCR) { 
-        $finalList += $bucketHKCR
-    }
-    if ($bucketHKCU) { 
-        if ($bucketHKCR) {
-            $finalList += (Get-Separator) 
-        }
-        $finalList += $bucketHKCU
-    }
-    if ($bucketHKLM) {
-        if ($bucketHKCR -or $bucketHKCU) {
-            $finalList += (Get-Separator) 
-        }
-        $finalList += $bucketHKLM
-    }
-    if ($bucketHKU) { 
-        if ($bucketHKCR -or $bucketHKCU -or $bucketHKLM) {
-            $finalList += (Get-Separator) 
-        }
-        $finalList += $bucketHKU
-    }
-    if ($bucketOther) {
-        if ($bucketHKCR -or $bucketHKCU -or $bucketHKLM -or $bucketHKU) {
-            $finalList += (Get-Separator) 
-        }
-        $finalList += $bucketOther
-    }
-
-    #Delete all existing favorites then replace, as the order is determined by the insertion order. https://superuser.com/questions/1860659/where-is-the-ordering-of-windows-regedit-favorites-menu-stored
-
-    #echo ($finalList | ConvertTo-Json)
+    #Delete all favorites then add them back, as regedit shows them in insertion order. https://superuser.com/questions/1860659/where-is-the-ordering-of-windows-regedit-favorites-menu-stored
     Remove-ItemProperty -Path $favoritesPath -Name "*"
-    foreach ($item in $finalList) {
-        if ($item) {
-            Set-ItemProperty -Path $favoritesPath -Name $item.Name -Value $item.Value
-        }
+    foreach ($favorite in $newFavorites.GetEnumerator()) {
+        Set-ItemProperty -LiteralPath $favoritesPath -Name $favorite.Key -Value $favorite.Value
     }
-    Write-Host "Added $nbAddedFavorites Regedit Favorites$titleSuffix"
+    echo "Set Regedit favorites$titleSuffix"
 }
 setRegistryFavorites
 if ($applyToDefaultUser) {
@@ -1365,6 +1358,26 @@ patchShortcut "powershell x86" "$env:APPDATA\Microsoft\Windows\Start Menu\Progra
 
 patchShortcut "cmd" "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\System Tools\Command Prompt.lnk" "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" 0x49F
 
+#Shortcut to the startup folder in the home folder. A shortcut to the folder itself would contain its absolute path, whereas explorer.exe shell:startup opens the startup folder of the user, so the shortcut also works when copied from the default user profile
+$startupShortcutTargets = @(,@("$env:USERPROFILE\Startup.lnk", ""))
+if ($applyToDefaultUser) {
+    $startupShortcutTargets += ,@("$defaultUserProfile\Startup.lnk", " for default user")
+}
+$wshShell = New-Object -ComObject WScript.Shell
+foreach ($target in $startupShortcutTargets) {
+    $shortcutPath, $msgSuffix = $target
+    #Loads the shortcut if it exists
+    $shortcut = $wshShell.CreateShortcut($shortcutPath)
+    if ($shortcut.TargetPath -eq "$env:SystemRoot\explorer.exe" -and $shortcut.Arguments -eq "shell:startup") {
+        Write-Host "Already added startup folder shortcut$msgSuffix" -ForegroundColor DarkGray
+        continue
+    }
+    $shortcut.TargetPath = "$env:SystemRoot\explorer.exe"
+    $shortcut.Arguments = "shell:startup"
+    $shortcut.Save()
+    echo "Added startup folder shortcut$msgSuffix"
+}
+
 
 # We can get conditional prompts with the autorun value, but only at startup (can't display git branch for example)
 # Using environment variables is risky in batch, so don't add user@hostname when connecting via ssh to avoid potential command injection
@@ -1398,35 +1411,35 @@ applyRegEdits "Set SYSTEM cmd.exe prompt" @(
 )
 
 
-$writeFileContent = [Convert]::FromBase64String('IyBpcm0gemV6LmRldiB8IGlleAoKI2h0dHBzOi8vd3d3Lml0LWNvbm5lY3QuZnIvY29tbWVudC1wZXJzb25uYWxpc2VyLWxlLXByb21wdC1kZS1zb24tZW52aXJvbm5lbWVudC1wb3dlcnNoZWxsLwojaHR0cHM6Ly9naXRodWIuY29tL3RiYWhldXgvaXRjb25uZWN0L2Jsb2IvbWFzdGVyL3Byb2ZpbGUucHMxCgojQXV0b21hdGljYWxseSBhZGQgSEtVIGFuZCBIS0NSIHJlZ2lzdHJ5IGRyaXZlcwppZiAoLW5vdCAoVGVzdC1QYXRoICJIS1U6IikpIHsKICAgIE5ldy1QU0RyaXZlIEhLVSBSZWdpc3RyeSBIS0VZX1VTRVJTIHwgT3V0LU51bGwKfQppZiAoLW5vdCAoVGVzdC1QYXRoICJIS0NSOiIpKSB7CiAgICBOZXctUFNEcml2ZSAtTmFtZSAiSEtDUiIgLVBTUHJvdmlkZXIgUmVnaXN0cnkgLVJvb3QgIkhLRVlfQ0xBU1NFU19ST09UIiB8IE91dC1OdWxsCn0KCmZ1bmN0aW9uIHByb21wdCB7CiAgICAkY3VycmVudFVzZXIgPSBbU3lzdGVtLlNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzSWRlbnRpdHldOjpHZXRDdXJyZW50KCkuTmFtZQogICAgJGN1cnJlbnRTaWQgPSBbU3lzdGVtLlNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzSWRlbnRpdHldOjpHZXRDdXJyZW50KCkuVXNlcgogICAgI1VubGlrZSAkZW52Omhvc3RuYW1lLCB0aGUgaG9zdG5hbWUgY29tbWFuZCByZXR1cm5zIHRoZSBkbnMgbmFtZSAod2hpY2ggaXNuJ3QgYWxsIHVwcGVyY2FzZSkKICAgICRjdXJyZW50SG9zdCA9ICQoaG9zdG5hbWUpCiAgICAjUmVtb3ZlIHJlZHVuZGFudCBkb21haW4gbmFtZSBmcm9tIHVzZXIKICAgICRjdXJyZW50VXNlciA9ICRjdXJyZW50VXNlciAtcmVwbGFjZSBbcmVnZXhdOjpFc2NhcGUoIiRjdXJyZW50SG9zdFwiLnRvVXBwZXIoKSksICcnCiAgICAkaXNBZG1pbiA9IChOZXctT2JqZWN0IFNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzUHJpbmNpcGFsIChbU2VjdXJpdHkuUHJpbmNpcGFsLldpbmRvd3NJZGVudGl0eV06OkdldEN1cnJlbnQoKSkpLklzSW5Sb2xlKFtTZWN1cml0eS5QcmluY2lwYWwuV2luZG93c0J1aWx0aW5Sb2xlXTo6QWRtaW5pc3RyYXRvcikKICAgICRpc0luU3NoID0gVGVzdC1QYXRoIGVudjpTU0hfQ09OTkVDVElPTgogICAgI0Rpc2FibGUgYWRtaW4gaW5kaWNhdG9yIGluIHNzaCBzZXNzaW9ucywgYXMgaXQgc2VlbXMgd2luZG93cyBwdXRzIGFkbWluIGJ5IGRlZmF1bHQKICAgICRhZG1pblByb21wdCA9IGlmICgkY3VycmVudFNpZCAtZXEgIlMtMS01LTE4IikgeyAiW1NZU1RFTV0gIiB9IGVsc2VpZiAoJGlzQWRtaW4gLWFuZCAtbm90ICRpc0luU3NoKSB7ICJbQWRtaW5dICIgfSBlbHNlIHsgIiIgfQogICAgJHNzaFByb21wdCA9ICIkY3VycmVudFVzZXJAJGN1cnJlbnRIb3N0IgogICAgJGN1cnJlbnRQYXRoID0gKEdldC1Mb2NhdGlvbikuUGF0aAoKICAgICNmZWVscyB0b28gd2VpcmQKICAgICMkY3VycmVudFBhdGggPSAkY3VycmVudFBhdGggLXJlcGxhY2UgW3JlZ2V4XTo6RXNjYXBlKCRlbnY6VVNFUlBST0ZJTEUpLCAnficKCiAgICB0cnkgewogICAgICAgICRnaXRCcmFuY2ggPSAoZ2l0IHJldi1wYXJzZSAtLWFiYnJldi1yZWYgSEVBRCAyPiRudWxsKQogICAgICAgICNJZiBjaGVja2luZyBvdXQgYSBzcGVjaWZpYyBjb21taXQsIHdlIG5lZWQgdG8gdXNlIC0tc2hvcnQKICAgICAgICBpZiAoJGdpdEJyYW5jaCAtZXEgIkhFQUQiKSB7CiAgICAgICAgICAgICRnaXRCcmFuY2ggPSAoZ2l0IHJldi1wYXJzZSAtLXNob3J0IEhFQUQgMj4kbnVsbCkKICAgICAgICB9CiAgICAgICAgaWYgKCRnaXRCcmFuY2ggLWVxICJtYXN0ZXIiIC1vciAkZ2l0QnJhbmNoIC1lcSAibWFpbiIpIHsKICAgICAgICAgICAgJGdpdEJyYW5jaCA9ICIiCiAgICAgICAgfQogICAgfSBjYXRjaCB7CiAgICAgICAgJGdpdEJyYW5jaCA9ICIiCiAgICB9CiAgICAkaG9zdC5VSS5SYXdVSS5XaW5kb3dUaXRsZSA9ICIkYWRtaW5Qcm9tcHQkY3VycmVudFBhdGgkKGlmICgkZ2l0QnJhbmNoKSB7ICIgKCRnaXRCcmFuY2gpIiB9IGVsc2UgeyAnJyB9KSAtIFBvd2Vyc2hlbGwiCiAgICBXcml0ZS1Ib3N0ICRhZG1pblByb21wdCAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgUmVkCiAgICBpZiAoJGlzSW5Tc2gpIHsKICAgICAgICBXcml0ZS1Ib3N0ICIkc3NoUHJvbXB0ICIgLU5vTmV3bGluZSAtZm9yZWdyb3VuZGNvbG9yIG1hZ2VudGEKICAgIH0KICAgIFdyaXRlLUhvc3QgIlBTICIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIEdyZWVuCiAgICBXcml0ZS1Ib3N0ICIkY3VycmVudFBhdGgiIC1Ob05ld2xpbmUgLUZvcmVncm91bmRDb2xvciBDeWFuCiAgICBpZiAoJGdpdEJyYW5jaCkgewogICAgICAgIGlmICgkaXNJblNzaCkgewogICAgICAgICAgICBXcml0ZS1Ib3N0ICIgJGdpdEJyYW5jaCIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIFllbGxvdwogICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgIFdyaXRlLUhvc3QgIiAkZ2l0QnJhbmNoIiAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgTWFnZW50YQogICAgICAgIH0KICAgIH0KICAgICNJdCBzZWVtcyBpdCBpcyBub3QgcG9zc2libGUgdG8gYWNjdXJhdGVseSBkZXRlY3QgaWYgdGhlIGxhc3QgY29tbWFuZCBmYWlsZWQKICAgICNpZiAoJD8gLWVxICRmYWxzZSkgewogICAgIyAgICBXcml0ZS1Ib3N0ICI+IiAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgUmVkCiAgICAjfSBlbHNlIHsKICAgICMgICAgV3JpdGUtSG9zdCAiPiIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIFdoaXRlCiAgICAjfQogICAgcmV0dXJuICIkKFtjaGFyXTI3KVswbT4gIgp9Cg==')
+$writeFileContent = [Convert]::FromBase64String('IyBpcm0gemV6LmRldiB8IGlleAoKI2h0dHBzOi8vd3d3Lml0LWNvbm5lY3QuZnIvY29tbWVudC1wZXJzb25uYWxpc2VyLWxlLXByb21wdC1kZS1zb24tZW52aXJvbm5lbWVudC1wb3dlcnNoZWxsLwojaHR0cHM6Ly9naXRodWIuY29tL3RiYWhldXgvaXRjb25uZWN0L2Jsb2IvbWFzdGVyL3Byb2ZpbGUucHMxCgojQXV0b21hdGljYWxseSBhZGQgSEtVIGFuZCBIS0NSIHJlZ2lzdHJ5IGRyaXZlcwppZiAoLW5vdCAoVGVzdC1QYXRoICJIS1U6IikpIHsKICAgIE5ldy1QU0RyaXZlIEhLVSBSZWdpc3RyeSBIS0VZX1VTRVJTIHwgT3V0LU51bGwKfQppZiAoLW5vdCAoVGVzdC1QYXRoICJIS0NSOiIpKSB7CiAgICBOZXctUFNEcml2ZSAtTmFtZSAiSEtDUiIgLVBTUHJvdmlkZXIgUmVnaXN0cnkgLVJvb3QgIkhLRVlfQ0xBU1NFU19ST09UIiB8IE91dC1OdWxsCn0KCmZ1bmN0aW9uIHByb21wdCB7CiAgICAjcHJvZmlsZS5wczEgaXMgYWxzbyBsb2FkZWQgd2hlbiBydW5uaW5nIHNjcmlwdHMgKHBvd2Vyc2hlbGwgLUZpbGUvLUNvbW1hbmQpLCBidXQgcHJvbXB0IGlzIG9ubHkgY2FsbGVkIGluIGludGVyYWN0aXZlIHNlc3Npb25zLCBzbyB0ZXJtaW5hbC1vbmx5IGZ1bmN0aW9ucyBhcmUgZGVmaW5lZCBhdCB0aGUgZmlyc3QgcHJvbXB0CiAgICBpZiAoLW5vdCAkZ2xvYmFsOnRlcm1pbmFsRnVuY3Rpb25zRGVmaW5lZCkgewogICAgICAgICRnbG9iYWw6dGVybWluYWxGdW5jdGlvbnNEZWZpbmVkID0gJHRydWUKICAgICAgICBpZiAoR2V0LUNvbW1hbmQgZ2l0IC1FcnJvckFjdGlvbiBTaWxlbnRseUNvbnRpbnVlKSB7CiAgICAgICAgICAgICNTYW1lIGFzIGdhY3AgaW4gbWFpbi5zaAogICAgICAgICAgICBmdW5jdGlvbiBnbG9iYWw6Z2FjcCB7CiAgICAgICAgICAgICAgICBwYXJhbSAoW3N0cmluZ10kbWVzc2FnZSA9ICIiKQogICAgICAgICAgICAgICAgZ2l0IGFkZCAtQQogICAgICAgICAgICAgICAgI1Bvd2VyU2hlbGwgNS4xIGRvZXMgbm90IHBhc3MgZW1wdHkgYXJndW1lbnRzIHRvIG5hdGl2ZSBwcm9ncmFtcywgc28gLW0gJG1lc3NhZ2Ugd291bGQgZmFpbCB3aXRoIGFuIGVtcHR5IG1lc3NhZ2UKICAgICAgICAgICAgICAgIGlmICgkTEFTVEVYSVRDT0RFIC1lcSAwKSB7IGdpdCBjb21taXQgLS1hbGxvdy1lbXB0eS1tZXNzYWdlICItLW1lc3NhZ2U9JG1lc3NhZ2UiIH0KICAgICAgICAgICAgICAgIGlmICgkTEFTVEVYSVRDT0RFIC1lcSAwKSB7IGdpdCBwdXNoIH0KICAgICAgICAgICAgfQogICAgICAgIH0KICAgIH0KCiAgICAkY3VycmVudFVzZXIgPSBbU3lzdGVtLlNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzSWRlbnRpdHldOjpHZXRDdXJyZW50KCkuTmFtZQogICAgJGN1cnJlbnRTaWQgPSBbU3lzdGVtLlNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzSWRlbnRpdHldOjpHZXRDdXJyZW50KCkuVXNlcgogICAgI1VubGlrZSAkZW52Omhvc3RuYW1lLCB0aGUgaG9zdG5hbWUgY29tbWFuZCByZXR1cm5zIHRoZSBkbnMgbmFtZSAod2hpY2ggaXNuJ3QgYWxsIHVwcGVyY2FzZSkKICAgICRjdXJyZW50SG9zdCA9ICQoaG9zdG5hbWUpCiAgICAjUmVtb3ZlIHJlZHVuZGFudCBkb21haW4gbmFtZSBmcm9tIHVzZXIKICAgICRjdXJyZW50VXNlciA9ICRjdXJyZW50VXNlciAtcmVwbGFjZSBbcmVnZXhdOjpFc2NhcGUoIiRjdXJyZW50SG9zdFwiLnRvVXBwZXIoKSksICcnCiAgICAkaXNBZG1pbiA9IChOZXctT2JqZWN0IFNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzUHJpbmNpcGFsIChbU2VjdXJpdHkuUHJpbmNpcGFsLldpbmRvd3NJZGVudGl0eV06OkdldEN1cnJlbnQoKSkpLklzSW5Sb2xlKFtTZWN1cml0eS5QcmluY2lwYWwuV2luZG93c0J1aWx0aW5Sb2xlXTo6QWRtaW5pc3RyYXRvcikKICAgICRpc0luU3NoID0gVGVzdC1QYXRoIGVudjpTU0hfQ09OTkVDVElPTgogICAgI0Rpc2FibGUgYWRtaW4gaW5kaWNhdG9yIGluIHNzaCBzZXNzaW9ucywgYXMgaXQgc2VlbXMgd2luZG93cyBwdXRzIGFkbWluIGJ5IGRlZmF1bHQKICAgICRhZG1pblByb21wdCA9IGlmICgkY3VycmVudFNpZCAtZXEgIlMtMS01LTE4IikgeyAiW1NZU1RFTV0gIiB9IGVsc2VpZiAoJGlzQWRtaW4gLWFuZCAtbm90ICRpc0luU3NoKSB7ICJbQWRtaW5dICIgfSBlbHNlIHsgIiIgfQogICAgJHNzaFByb21wdCA9ICIkY3VycmVudFVzZXJAJGN1cnJlbnRIb3N0IgogICAgJGN1cnJlbnRQYXRoID0gKEdldC1Mb2NhdGlvbikuUGF0aAoKICAgICNmZWVscyB0b28gd2VpcmQKICAgICMkY3VycmVudFBhdGggPSAkY3VycmVudFBhdGggLXJlcGxhY2UgW3JlZ2V4XTo6RXNjYXBlKCRlbnY6VVNFUlBST0ZJTEUpLCAnficKCiAgICB0cnkgewogICAgICAgICRnaXRCcmFuY2ggPSAoZ2l0IHJldi1wYXJzZSAtLWFiYnJldi1yZWYgSEVBRCAyPiRudWxsKQogICAgICAgICNJZiBjaGVja2luZyBvdXQgYSBzcGVjaWZpYyBjb21taXQsIHdlIG5lZWQgdG8gdXNlIC0tc2hvcnQKICAgICAgICBpZiAoJGdpdEJyYW5jaCAtZXEgIkhFQUQiKSB7CiAgICAgICAgICAgICRnaXRCcmFuY2ggPSAoZ2l0IHJldi1wYXJzZSAtLXNob3J0IEhFQUQgMj4kbnVsbCkKICAgICAgICB9CiAgICAgICAgaWYgKCRnaXRCcmFuY2ggLWVxICJtYXN0ZXIiIC1vciAkZ2l0QnJhbmNoIC1lcSAibWFpbiIpIHsKICAgICAgICAgICAgJGdpdEJyYW5jaCA9ICIiCiAgICAgICAgfQogICAgfSBjYXRjaCB7CiAgICAgICAgJGdpdEJyYW5jaCA9ICIiCiAgICB9CiAgICAkaG9zdC5VSS5SYXdVSS5XaW5kb3dUaXRsZSA9ICIkYWRtaW5Qcm9tcHQkY3VycmVudFBhdGgkKGlmICgkZ2l0QnJhbmNoKSB7ICIgKCRnaXRCcmFuY2gpIiB9IGVsc2UgeyAnJyB9KSAtIFBvd2Vyc2hlbGwiCiAgICBXcml0ZS1Ib3N0ICRhZG1pblByb21wdCAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgUmVkCiAgICBpZiAoJGlzSW5Tc2gpIHsKICAgICAgICBXcml0ZS1Ib3N0ICIkc3NoUHJvbXB0ICIgLU5vTmV3bGluZSAtZm9yZWdyb3VuZGNvbG9yIG1hZ2VudGEKICAgIH0KICAgIFdyaXRlLUhvc3QgIlBTICIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIEdyZWVuCiAgICBXcml0ZS1Ib3N0ICIkY3VycmVudFBhdGgiIC1Ob05ld2xpbmUgLUZvcmVncm91bmRDb2xvciBDeWFuCiAgICBpZiAoJGdpdEJyYW5jaCkgewogICAgICAgIGlmICgkaXNJblNzaCkgewogICAgICAgICAgICBXcml0ZS1Ib3N0ICIgJGdpdEJyYW5jaCIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIFllbGxvdwogICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgIFdyaXRlLUhvc3QgIiAkZ2l0QnJhbmNoIiAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgTWFnZW50YQogICAgICAgIH0KICAgIH0KICAgICNJdCBzZWVtcyBpdCBpcyBub3QgcG9zc2libGUgdG8gYWNjdXJhdGVseSBkZXRlY3QgaWYgdGhlIGxhc3QgY29tbWFuZCBmYWlsZWQKICAgICNpZiAoJD8gLWVxICRmYWxzZSkgewogICAgIyAgICBXcml0ZS1Ib3N0ICI+IiAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgUmVkCiAgICAjfSBlbHNlIHsKICAgICMgICAgV3JpdGUtSG9zdCAiPiIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIFdoaXRlCiAgICAjfQogICAgcmV0dXJuICIkKFtjaGFyXTI3KVswbT4gIgp9Cg==')
 $writeFileDest = "$env:USERPROFILE\Documents\WindowsPowerShell\profile.ps1"
-if ((Test-Path -LiteralPath $writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793082074).UtcDateTime) {
-    Write-Host 'Already set PowerShell profile' -ForegroundColor DarkGray
+if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793112594).UtcDateTime) {
+    Write-Host "Already set PowerShell profile" -ForegroundColor DarkGray
 } else {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
     [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
-    echo 'Set PowerShell profile'
+    echo "Set PowerShell profile"
 }
 if ($applyToDefaultUser) {
     $writeFileDest = "$defaultUserProfile\Documents\WindowsPowerShell\profile.ps1"
-    if ((Test-Path -LiteralPath $writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793082074).UtcDateTime) {
-        Write-Host 'Already set PowerShell profile for default user' -ForegroundColor DarkGray
+    if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793112594).UtcDateTime) {
+        Write-Host "Already set PowerShell profile for default user" -ForegroundColor DarkGray
     } else {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
         [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
-        echo 'Set PowerShell profile for default user'
+        echo "Set PowerShell profile for default user"
     }
 }
-$writeFileContent = [Convert]::FromBase64String('IyBpcm0gemV6LmRldiB8IGlleAoKI2h0dHBzOi8vd3d3Lml0LWNvbm5lY3QuZnIvY29tbWVudC1wZXJzb25uYWxpc2VyLWxlLXByb21wdC1kZS1zb24tZW52aXJvbm5lbWVudC1wb3dlcnNoZWxsLwojaHR0cHM6Ly9naXRodWIuY29tL3RiYWhldXgvaXRjb25uZWN0L2Jsb2IvbWFzdGVyL3Byb2ZpbGUucHMxCgojQXV0b21hdGljYWxseSBhZGQgSEtVIGFuZCBIS0NSIHJlZ2lzdHJ5IGRyaXZlcwppZiAoLW5vdCAoVGVzdC1QYXRoICJIS1U6IikpIHsKICAgIE5ldy1QU0RyaXZlIEhLVSBSZWdpc3RyeSBIS0VZX1VTRVJTIHwgT3V0LU51bGwKfQppZiAoLW5vdCAoVGVzdC1QYXRoICJIS0NSOiIpKSB7CiAgICBOZXctUFNEcml2ZSAtTmFtZSAiSEtDUiIgLVBTUHJvdmlkZXIgUmVnaXN0cnkgLVJvb3QgIkhLRVlfQ0xBU1NFU19ST09UIiB8IE91dC1OdWxsCn0KCmZ1bmN0aW9uIHByb21wdCB7CiAgICAkY3VycmVudFVzZXIgPSBbU3lzdGVtLlNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzSWRlbnRpdHldOjpHZXRDdXJyZW50KCkuTmFtZQogICAgJGN1cnJlbnRTaWQgPSBbU3lzdGVtLlNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzSWRlbnRpdHldOjpHZXRDdXJyZW50KCkuVXNlcgogICAgI1VubGlrZSAkZW52Omhvc3RuYW1lLCB0aGUgaG9zdG5hbWUgY29tbWFuZCByZXR1cm5zIHRoZSBkbnMgbmFtZSAod2hpY2ggaXNuJ3QgYWxsIHVwcGVyY2FzZSkKICAgICRjdXJyZW50SG9zdCA9ICQoaG9zdG5hbWUpCiAgICAjUmVtb3ZlIHJlZHVuZGFudCBkb21haW4gbmFtZSBmcm9tIHVzZXIKICAgICRjdXJyZW50VXNlciA9ICRjdXJyZW50VXNlciAtcmVwbGFjZSBbcmVnZXhdOjpFc2NhcGUoIiRjdXJyZW50SG9zdFwiLnRvVXBwZXIoKSksICcnCiAgICAkaXNBZG1pbiA9IChOZXctT2JqZWN0IFNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzUHJpbmNpcGFsIChbU2VjdXJpdHkuUHJpbmNpcGFsLldpbmRvd3NJZGVudGl0eV06OkdldEN1cnJlbnQoKSkpLklzSW5Sb2xlKFtTZWN1cml0eS5QcmluY2lwYWwuV2luZG93c0J1aWx0aW5Sb2xlXTo6QWRtaW5pc3RyYXRvcikKICAgICRpc0luU3NoID0gVGVzdC1QYXRoIGVudjpTU0hfQ09OTkVDVElPTgogICAgI0Rpc2FibGUgYWRtaW4gaW5kaWNhdG9yIGluIHNzaCBzZXNzaW9ucywgYXMgaXQgc2VlbXMgd2luZG93cyBwdXRzIGFkbWluIGJ5IGRlZmF1bHQKICAgICRhZG1pblByb21wdCA9IGlmICgkY3VycmVudFNpZCAtZXEgIlMtMS01LTE4IikgeyAiW1NZU1RFTV0gIiB9IGVsc2VpZiAoJGlzQWRtaW4gLWFuZCAtbm90ICRpc0luU3NoKSB7ICJbQWRtaW5dICIgfSBlbHNlIHsgIiIgfQogICAgJHNzaFByb21wdCA9ICIkY3VycmVudFVzZXJAJGN1cnJlbnRIb3N0IgogICAgJGN1cnJlbnRQYXRoID0gKEdldC1Mb2NhdGlvbikuUGF0aAoKICAgICNmZWVscyB0b28gd2VpcmQKICAgICMkY3VycmVudFBhdGggPSAkY3VycmVudFBhdGggLXJlcGxhY2UgW3JlZ2V4XTo6RXNjYXBlKCRlbnY6VVNFUlBST0ZJTEUpLCAnficKCiAgICB0cnkgewogICAgICAgICRnaXRCcmFuY2ggPSAoZ2l0IHJldi1wYXJzZSAtLWFiYnJldi1yZWYgSEVBRCAyPiRudWxsKQogICAgICAgICNJZiBjaGVja2luZyBvdXQgYSBzcGVjaWZpYyBjb21taXQsIHdlIG5lZWQgdG8gdXNlIC0tc2hvcnQKICAgICAgICBpZiAoJGdpdEJyYW5jaCAtZXEgIkhFQUQiKSB7CiAgICAgICAgICAgICRnaXRCcmFuY2ggPSAoZ2l0IHJldi1wYXJzZSAtLXNob3J0IEhFQUQgMj4kbnVsbCkKICAgICAgICB9CiAgICAgICAgaWYgKCRnaXRCcmFuY2ggLWVxICJtYXN0ZXIiIC1vciAkZ2l0QnJhbmNoIC1lcSAibWFpbiIpIHsKICAgICAgICAgICAgJGdpdEJyYW5jaCA9ICIiCiAgICAgICAgfQogICAgfSBjYXRjaCB7CiAgICAgICAgJGdpdEJyYW5jaCA9ICIiCiAgICB9CiAgICAkaG9zdC5VSS5SYXdVSS5XaW5kb3dUaXRsZSA9ICIkYWRtaW5Qcm9tcHQkY3VycmVudFBhdGgkKGlmICgkZ2l0QnJhbmNoKSB7ICIgKCRnaXRCcmFuY2gpIiB9IGVsc2UgeyAnJyB9KSAtIFBvd2Vyc2hlbGwiCiAgICBXcml0ZS1Ib3N0ICRhZG1pblByb21wdCAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgUmVkCiAgICBpZiAoJGlzSW5Tc2gpIHsKICAgICAgICBXcml0ZS1Ib3N0ICIkc3NoUHJvbXB0ICIgLU5vTmV3bGluZSAtZm9yZWdyb3VuZGNvbG9yIG1hZ2VudGEKICAgIH0KICAgIFdyaXRlLUhvc3QgIlBTICIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIEdyZWVuCiAgICBXcml0ZS1Ib3N0ICIkY3VycmVudFBhdGgiIC1Ob05ld2xpbmUgLUZvcmVncm91bmRDb2xvciBDeWFuCiAgICBpZiAoJGdpdEJyYW5jaCkgewogICAgICAgIGlmICgkaXNJblNzaCkgewogICAgICAgICAgICBXcml0ZS1Ib3N0ICIgJGdpdEJyYW5jaCIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIFllbGxvdwogICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgIFdyaXRlLUhvc3QgIiAkZ2l0QnJhbmNoIiAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgTWFnZW50YQogICAgICAgIH0KICAgIH0KICAgICNJdCBzZWVtcyBpdCBpcyBub3QgcG9zc2libGUgdG8gYWNjdXJhdGVseSBkZXRlY3QgaWYgdGhlIGxhc3QgY29tbWFuZCBmYWlsZWQKICAgICNpZiAoJD8gLWVxICRmYWxzZSkgewogICAgIyAgICBXcml0ZS1Ib3N0ICI+IiAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgUmVkCiAgICAjfSBlbHNlIHsKICAgICMgICAgV3JpdGUtSG9zdCAiPiIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIFdoaXRlCiAgICAjfQogICAgcmV0dXJuICIkKFtjaGFyXTI3KVswbT4gIgp9Cg==')
+$writeFileContent = [Convert]::FromBase64String('IyBpcm0gemV6LmRldiB8IGlleAoKI2h0dHBzOi8vd3d3Lml0LWNvbm5lY3QuZnIvY29tbWVudC1wZXJzb25uYWxpc2VyLWxlLXByb21wdC1kZS1zb24tZW52aXJvbm5lbWVudC1wb3dlcnNoZWxsLwojaHR0cHM6Ly9naXRodWIuY29tL3RiYWhldXgvaXRjb25uZWN0L2Jsb2IvbWFzdGVyL3Byb2ZpbGUucHMxCgojQXV0b21hdGljYWxseSBhZGQgSEtVIGFuZCBIS0NSIHJlZ2lzdHJ5IGRyaXZlcwppZiAoLW5vdCAoVGVzdC1QYXRoICJIS1U6IikpIHsKICAgIE5ldy1QU0RyaXZlIEhLVSBSZWdpc3RyeSBIS0VZX1VTRVJTIHwgT3V0LU51bGwKfQppZiAoLW5vdCAoVGVzdC1QYXRoICJIS0NSOiIpKSB7CiAgICBOZXctUFNEcml2ZSAtTmFtZSAiSEtDUiIgLVBTUHJvdmlkZXIgUmVnaXN0cnkgLVJvb3QgIkhLRVlfQ0xBU1NFU19ST09UIiB8IE91dC1OdWxsCn0KCmZ1bmN0aW9uIHByb21wdCB7CiAgICAjcHJvZmlsZS5wczEgaXMgYWxzbyBsb2FkZWQgd2hlbiBydW5uaW5nIHNjcmlwdHMgKHBvd2Vyc2hlbGwgLUZpbGUvLUNvbW1hbmQpLCBidXQgcHJvbXB0IGlzIG9ubHkgY2FsbGVkIGluIGludGVyYWN0aXZlIHNlc3Npb25zLCBzbyB0ZXJtaW5hbC1vbmx5IGZ1bmN0aW9ucyBhcmUgZGVmaW5lZCBhdCB0aGUgZmlyc3QgcHJvbXB0CiAgICBpZiAoLW5vdCAkZ2xvYmFsOnRlcm1pbmFsRnVuY3Rpb25zRGVmaW5lZCkgewogICAgICAgICRnbG9iYWw6dGVybWluYWxGdW5jdGlvbnNEZWZpbmVkID0gJHRydWUKICAgICAgICBpZiAoR2V0LUNvbW1hbmQgZ2l0IC1FcnJvckFjdGlvbiBTaWxlbnRseUNvbnRpbnVlKSB7CiAgICAgICAgICAgICNTYW1lIGFzIGdhY3AgaW4gbWFpbi5zaAogICAgICAgICAgICBmdW5jdGlvbiBnbG9iYWw6Z2FjcCB7CiAgICAgICAgICAgICAgICBwYXJhbSAoW3N0cmluZ10kbWVzc2FnZSA9ICIiKQogICAgICAgICAgICAgICAgZ2l0IGFkZCAtQQogICAgICAgICAgICAgICAgI1Bvd2VyU2hlbGwgNS4xIGRvZXMgbm90IHBhc3MgZW1wdHkgYXJndW1lbnRzIHRvIG5hdGl2ZSBwcm9ncmFtcywgc28gLW0gJG1lc3NhZ2Ugd291bGQgZmFpbCB3aXRoIGFuIGVtcHR5IG1lc3NhZ2UKICAgICAgICAgICAgICAgIGlmICgkTEFTVEVYSVRDT0RFIC1lcSAwKSB7IGdpdCBjb21taXQgLS1hbGxvdy1lbXB0eS1tZXNzYWdlICItLW1lc3NhZ2U9JG1lc3NhZ2UiIH0KICAgICAgICAgICAgICAgIGlmICgkTEFTVEVYSVRDT0RFIC1lcSAwKSB7IGdpdCBwdXNoIH0KICAgICAgICAgICAgfQogICAgICAgIH0KICAgIH0KCiAgICAkY3VycmVudFVzZXIgPSBbU3lzdGVtLlNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzSWRlbnRpdHldOjpHZXRDdXJyZW50KCkuTmFtZQogICAgJGN1cnJlbnRTaWQgPSBbU3lzdGVtLlNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzSWRlbnRpdHldOjpHZXRDdXJyZW50KCkuVXNlcgogICAgI1VubGlrZSAkZW52Omhvc3RuYW1lLCB0aGUgaG9zdG5hbWUgY29tbWFuZCByZXR1cm5zIHRoZSBkbnMgbmFtZSAod2hpY2ggaXNuJ3QgYWxsIHVwcGVyY2FzZSkKICAgICRjdXJyZW50SG9zdCA9ICQoaG9zdG5hbWUpCiAgICAjUmVtb3ZlIHJlZHVuZGFudCBkb21haW4gbmFtZSBmcm9tIHVzZXIKICAgICRjdXJyZW50VXNlciA9ICRjdXJyZW50VXNlciAtcmVwbGFjZSBbcmVnZXhdOjpFc2NhcGUoIiRjdXJyZW50SG9zdFwiLnRvVXBwZXIoKSksICcnCiAgICAkaXNBZG1pbiA9IChOZXctT2JqZWN0IFNlY3VyaXR5LlByaW5jaXBhbC5XaW5kb3dzUHJpbmNpcGFsIChbU2VjdXJpdHkuUHJpbmNpcGFsLldpbmRvd3NJZGVudGl0eV06OkdldEN1cnJlbnQoKSkpLklzSW5Sb2xlKFtTZWN1cml0eS5QcmluY2lwYWwuV2luZG93c0J1aWx0aW5Sb2xlXTo6QWRtaW5pc3RyYXRvcikKICAgICRpc0luU3NoID0gVGVzdC1QYXRoIGVudjpTU0hfQ09OTkVDVElPTgogICAgI0Rpc2FibGUgYWRtaW4gaW5kaWNhdG9yIGluIHNzaCBzZXNzaW9ucywgYXMgaXQgc2VlbXMgd2luZG93cyBwdXRzIGFkbWluIGJ5IGRlZmF1bHQKICAgICRhZG1pblByb21wdCA9IGlmICgkY3VycmVudFNpZCAtZXEgIlMtMS01LTE4IikgeyAiW1NZU1RFTV0gIiB9IGVsc2VpZiAoJGlzQWRtaW4gLWFuZCAtbm90ICRpc0luU3NoKSB7ICJbQWRtaW5dICIgfSBlbHNlIHsgIiIgfQogICAgJHNzaFByb21wdCA9ICIkY3VycmVudFVzZXJAJGN1cnJlbnRIb3N0IgogICAgJGN1cnJlbnRQYXRoID0gKEdldC1Mb2NhdGlvbikuUGF0aAoKICAgICNmZWVscyB0b28gd2VpcmQKICAgICMkY3VycmVudFBhdGggPSAkY3VycmVudFBhdGggLXJlcGxhY2UgW3JlZ2V4XTo6RXNjYXBlKCRlbnY6VVNFUlBST0ZJTEUpLCAnficKCiAgICB0cnkgewogICAgICAgICRnaXRCcmFuY2ggPSAoZ2l0IHJldi1wYXJzZSAtLWFiYnJldi1yZWYgSEVBRCAyPiRudWxsKQogICAgICAgICNJZiBjaGVja2luZyBvdXQgYSBzcGVjaWZpYyBjb21taXQsIHdlIG5lZWQgdG8gdXNlIC0tc2hvcnQKICAgICAgICBpZiAoJGdpdEJyYW5jaCAtZXEgIkhFQUQiKSB7CiAgICAgICAgICAgICRnaXRCcmFuY2ggPSAoZ2l0IHJldi1wYXJzZSAtLXNob3J0IEhFQUQgMj4kbnVsbCkKICAgICAgICB9CiAgICAgICAgaWYgKCRnaXRCcmFuY2ggLWVxICJtYXN0ZXIiIC1vciAkZ2l0QnJhbmNoIC1lcSAibWFpbiIpIHsKICAgICAgICAgICAgJGdpdEJyYW5jaCA9ICIiCiAgICAgICAgfQogICAgfSBjYXRjaCB7CiAgICAgICAgJGdpdEJyYW5jaCA9ICIiCiAgICB9CiAgICAkaG9zdC5VSS5SYXdVSS5XaW5kb3dUaXRsZSA9ICIkYWRtaW5Qcm9tcHQkY3VycmVudFBhdGgkKGlmICgkZ2l0QnJhbmNoKSB7ICIgKCRnaXRCcmFuY2gpIiB9IGVsc2UgeyAnJyB9KSAtIFBvd2Vyc2hlbGwiCiAgICBXcml0ZS1Ib3N0ICRhZG1pblByb21wdCAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgUmVkCiAgICBpZiAoJGlzSW5Tc2gpIHsKICAgICAgICBXcml0ZS1Ib3N0ICIkc3NoUHJvbXB0ICIgLU5vTmV3bGluZSAtZm9yZWdyb3VuZGNvbG9yIG1hZ2VudGEKICAgIH0KICAgIFdyaXRlLUhvc3QgIlBTICIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIEdyZWVuCiAgICBXcml0ZS1Ib3N0ICIkY3VycmVudFBhdGgiIC1Ob05ld2xpbmUgLUZvcmVncm91bmRDb2xvciBDeWFuCiAgICBpZiAoJGdpdEJyYW5jaCkgewogICAgICAgIGlmICgkaXNJblNzaCkgewogICAgICAgICAgICBXcml0ZS1Ib3N0ICIgJGdpdEJyYW5jaCIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIFllbGxvdwogICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgIFdyaXRlLUhvc3QgIiAkZ2l0QnJhbmNoIiAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgTWFnZW50YQogICAgICAgIH0KICAgIH0KICAgICNJdCBzZWVtcyBpdCBpcyBub3QgcG9zc2libGUgdG8gYWNjdXJhdGVseSBkZXRlY3QgaWYgdGhlIGxhc3QgY29tbWFuZCBmYWlsZWQKICAgICNpZiAoJD8gLWVxICRmYWxzZSkgewogICAgIyAgICBXcml0ZS1Ib3N0ICI+IiAtTm9OZXdsaW5lIC1Gb3JlZ3JvdW5kQ29sb3IgUmVkCiAgICAjfSBlbHNlIHsKICAgICMgICAgV3JpdGUtSG9zdCAiPiIgLU5vTmV3bGluZSAtRm9yZWdyb3VuZENvbG9yIFdoaXRlCiAgICAjfQogICAgcmV0dXJuICIkKFtjaGFyXTI3KVswbT4gIgp9Cg==')
 $writeFileDest = "C:\WINDOWS\system32\config\systemprofile\Documents\WindowsPowerShell\profile.ps1"
-if ((Test-Path -LiteralPath $writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793082074).UtcDateTime) {
-    Write-Host 'Already set SYSTEM PowerShell profile' -ForegroundColor DarkGray
+if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793112594).UtcDateTime) {
+    Write-Host "Already set SYSTEM PowerShell profile" -ForegroundColor DarkGray
 } elseif (-not $isAdmin) {
-    Write-Host 'Cannot set SYSTEM PowerShell profile, needs admin rights' -ForegroundColor Yellow
+    Write-Host "Cannot set SYSTEM PowerShell profile, needs admin rights" -ForegroundColor Yellow
 } else {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
     [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
-    echo 'Set SYSTEM PowerShell profile'
+    echo "Set SYSTEM PowerShell profile"
 }
 
 #profile.ps1 is loaded by all hosts, Microsoft.PowerShell_profile.ps1 only by the console (after profile.ps1), so an old copy would override the prompt
@@ -1444,23 +1457,23 @@ if (-not $isAdmin) {
 }
 
 
-$writeFileContent = [Convert]::FromBase64String('IyEvYmluL2Jhc2gKIyAuYmFzaHJjIHZlcnNpb24gMjAyNi0xMC0yNwojIGN1cmwgemV6LmRldiAtTG8gLmJhc2hyYwojIHdnZXQgemV6LmRldiAtTyAuYmFzaHJjCgojIElmIG5vdCBydW5uaW5nIGludGVyYWN0aXZlbHksIGRvbid0IGRvIGFueXRoaW5nCmNhc2UgJC0gaW4KICAgICppKikgOzsKICAgICAgKikgcmV0dXJuOzsKZXNhYwoKCkhJU1RDT05UUk9MPWlnbm9yZWJvdGggIyBkb24ndCBwdXQgZHVwbGljYXRlIGxpbmVzIG9yIGxpbmVzIHN0YXJ0aW5nIHdpdGggc3BhY2UgaW4gdGhlIGhpc3RvcnkKc2hvcHQgLXMgaGlzdGFwcGVuZCAjIGFwcGVuZCB0byB0aGUgaGlzdG9yeSBmaWxlLCBkb24ndCBvdmVyd3JpdGUgaXQKCkhJU1RTSVpFPTEwMDAKSElTVEZJTEVTSVpFPTIwMDAKCnNob3B0IC1zIGNoZWNrd2luc2l6ZSAjIGNoZWNrIHRoZSB3aW5kb3cgc2l6ZSBhZnRlciBlYWNoIGNvbW1hbmQgYW5kLCBpZiBuZWNlc3NhcnksIHVwZGF0ZSB0aGUgdmFsdWVzIG9mIExJTkVTIGFuZCBDT0xVTU5TLgpzaG9wdCAtcyBnbG9ic3RhciAjYWxsb3cgKiogaW4gZ2xvYgpzaG9wdCAtcyBleHRnbG9iICNhbGxvdyBleHRlbmRlZCBnbG9iIG1hdGNoaW5nIHN1Y2ggYXMgPyhwYXR0ZXJuKSwgKihwYXR0ZXJuKSwgZXRjCnNob3B0IC1zIGRvdGdsb2IgI2FsbG93IGdsb2JiaW5nIHRvIG1hdGNoIGhpZGRlbiBmaWxlcyAoZmlsZXMgc3RhcnRpbmcgd2l0aCBhIGRvdCkKc2V0ICtIICNkaXNhYmxlICIhIiBleHBhbmRpbmcgdG8gaGlzdG9yeQoKI0F2b2lkIC4qIG1hdGNoaW5nIC4gYW5kIC4uCkdMT0JJR05PUkU9Ii46Li4iCgojZGlzYWJsZSBhcyBpdCBjYXVzZXMgcHJvYmxlbXMgd2l0aCBzY3AgYXV0b2NvbXBsZXRpb24KI3Nob3B0IC1zIGZhaWxnbG9iICNpZiBkb2luZyBscyAqbm9tYXRjaCosIGl0IHdpbGwgY2F1c2UgYW4gZXJyb3IgaW5zdGVhZCBvZiBwYXNzaW5nICIqbm9tYXRjaCoiIHRvIGxzCgojIGVuYWJsZSBjb2xvciBzdXBwb3J0IG9mIGxzIGFuZCBhbHNvIGFkZCBoYW5keSBhbGlhc2VzCmlmIFsgLXggL3Vzci9iaW4vZGlyY29sb3JzIF07IHRoZW4KICAgIHRlc3QgLXIgfi8uZGlyY29sb3JzICYmIGV2YWwgIiQoZGlyY29sb3JzIC1iIH4vLmRpcmNvbG9ycykiIHx8IGV2YWwgIiQoZGlyY29sb3JzIC1iKSIKICAgIGFsaWFzIGxzPSdscyAtLWNvbG9yPWF1dG8nCiAgICBhbGlhcyBkaXI9J2RpciAtLWNvbG9yPWF1dG8nCiAgICBhbGlhcyB2ZGlyPSd2ZGlyIC0tY29sb3I9YXV0bycKCiAgICBhbGlhcyBncmVwPSdncmVwIC0tY29sb3I9YXV0bycKICAgIGFsaWFzIGZncmVwPSdmZ3JlcCAtLWNvbG9yPWF1dG8nCiAgICBhbGlhcyBlZ3JlcD0nZWdyZXAgLS1jb2xvcj1hdXRvJwpmaQoKIyBjb2xvcmVkIEdDQyB3YXJuaW5ncyBhbmQgZXJyb3JzCmV4cG9ydCBHQ0NfQ09MT1JTPSdlcnJvcj0wMTszMTp3YXJuaW5nPTAxOzM1Om5vdGU9MDE7MzY6Y2FyZXQ9MDE7MzI6bG9jdXM9MDE6cXVvdGU9MDEnCgphbGlhcyBsbD0nbHMgLWxhRicKCmlmIFsgLWYgfi8uYmFzaF9hbGlhc2VzIF07IHRoZW4KICAgIC4gfi8uYmFzaF9hbGlhc2VzCmZpCgoKIyBzZXQgdmFyaWFibGUgaWRlbnRpZnlpbmcgdGhlIGNocm9vdCB5b3Ugd29yayBpbiAodXNlZCBpbiB0aGUgcHJvbXB0IGJlbG93KQppZiBbIC16ICIke2RlYmlhbl9jaHJvb3Q6LX0iIF0gJiYgWyAtciAvZXRjL2RlYmlhbl9jaHJvb3QgXTsgdGhlbgogICAgZGViaWFuX2Nocm9vdD0kKGNhdCAvZXRjL2RlYmlhbl9jaHJvb3QpCmZpCgpwcm9tcHRfZ2V0X2dpdF9icmFuY2goKSB7CiAgICB0aXRsZT0kMQogICAgX1BST01QVF9DVVJSRU5UX0dJVF9CUkFOQ0g9JChnaXQgcmV2LXBhcnNlIC0tYWJicmV2LXJlZiBIRUFEIDI+L2Rldi9udWxsKQogICAgaWYgW1sgJF9QUk9NUFRfQ1VSUkVOVF9HSVRfQlJBTkNIID09ICJIRUFEIiBdXTsgdGhlbgogICAgICAgICNJZiBjaGVja2luZyBvdXQgYSBzcGVjaWZpYyBjb21taXQsIHdlIG5lZWQgdG8gdXNlIC0tc2hvcnQKICAgICAgICBfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSD0kKGdpdCByZXYtcGFyc2UgLS1zaG9ydCBIRUFEIDI+L2Rldi9udWxsKQogICAgZmkKICAgIGlmIFtbICEgLXogJF9QUk9NUFRfQ1VSUkVOVF9HSVRfQlJBTkNIICYmICRfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSCAhPSAibWFpbiIgJiYgJF9QUk9NUFRfQ1VSUkVOVF9HSVRfQlJBTkNIICE9ICJtYXN0ZXIiIF1dOyB0aGVuCiAgICAgICAgaWYgW1sgJHRpdGxlID09ICJ0cnVlIiBdXTsgdGhlbgogICAgICAgICAgICBfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSD0iKCRfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSCkiCiAgICAgICAgZmkKICAgICAgICBfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSD0iICRfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSCIKICAgIGVsc2UKICAgICAgICBfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSD0iIgogICAgZmkKICAgIGVjaG8gIiRfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSCIKfQoKcHJvbXB0X2dldF9taW5ndzY0KCkgewogICAgdGl0bGU9JDEKICAgIGlmIFtbICIkTVNZU1RFTSIgPT0gIk1JTkdXNjQiIF1dOyB0aGVuCiAgICAgICAgaWYgW1sgJHRpdGxlID09ICJ0cnVlIiBdXTsgdGhlbgogICAgICAgICAgICBlY2hvICIgLSBNSU5HVzY0IgogICAgICAgIGVsaWYgW1sgLXogIiRTU0hfQ09OTkVDVElPTiIgXV07IHRoZW4KICAgICAgICAgICAgZWNobyAiTUlOR1c2NCIKICAgICAgICBlbHNlCiAgICAgICAgICAgIGVjaG8gIiBNSU5HVzY0IgogICAgICAgIGZpCiAgICBlbHNlCiAgICAgICAgZWNobyAiIgogICAgZmkKfQoKcHJvbXB0X2Rpc3BsYXlfdXNlcl9ob3N0bmFtZSgpIHsKICAgICMgRGlzcGxheSB1c2VyQGhvc3RuYW1lLCB1bmxlc3Mgd2UgYXJlIGluIG1pbmd3NjQgKGdpdCBiYXNoKSBhbmQgbm90IGluIHNzaAogICAgaWYgW1sgIiRNU1lTVEVNIiA9PSAiTUlOR1c2NCIgJiYgLXogIiRTU0hfQ09OTkVDVElPTiIgXV07IHRoZW4KICAgICAgICByZXR1cm4gMQogICAgZWxzZQogICAgICAgIHJldHVybiAwCiAgICBmaQp9CgpQUk9NUFRfSE9TVE5BTUU9JHtQUk9NUFRfSE9TVE5BTUU6LSRIT1NUTkFNRX0KCmlmIFtbICRNU1lTVEVNID09ICJNSU5HVzY0IiBdXTsgdGhlbgogICAgUFMxPScke2RlYmlhbl9jaHJvb3Q6KygkZGViaWFuX2Nocm9vdCl9XFtcMDMzWzAxOzM1bVxdJChwcm9tcHRfZGlzcGxheV91c2VyX2hvc3RuYW1lICYmIGVjaG8gIlx1QCRQUk9NUFRfSE9TVE5BTUUgIiB8fCBlY2hvICcnKVxbXDAzM1swbVwwMzNbOTJtXF1NSU5HVzY0XFtcMDMzWzBtXF0gXFtcMDMzWzAxOzM0bVxdXHdcW1wwMzNbMDE7MzZtXF0kKHByb21wdF9nZXRfZ2l0X2JyYW5jaClcW1wwMzNbMDBtXF0+ICcKZWxzZQoKICAgIFBTMT0nJHtkZWJpYW5fY2hyb290OisoJGRlYmlhbl9jaHJvb3QpfVxbXDAzM1swMTszMm1cXVx1QCRQUk9NUFRfSE9TVE5BTUVcW1wwMzNbMG1cXTpcW1wwMzNbMDE7MzRtXF1cd1xbXDAzM1swMTszNW1cXSQocHJvbXB0X2dldF9naXRfYnJhbmNoKVxbXDAzM1swMG1cXVwkICcKZmkKCiMgSWYgdGhpcyBpcyBhbiB4dGVybSBzZXQgdGhlIHRpdGxlIHRvIHVzZXJAaG9zdDogZGlyIDxicmFuY2g+CmNhc2UgIiRURVJNIiBpbgp4dGVybSp8cnh2dCopCiAgICBQUzE9IlxbXGVdMDske2RlYmlhbl9jaHJvb3Q6KygkZGViaWFuX2Nocm9vdCl9XCQocHJvbXB0X2Rpc3BsYXlfdXNlcl9ob3N0bmFtZSAmJiBlY2hvICdcdUAkUFJPTVBUX0hPU1ROQU1FOiAnIHx8IGVjaG8gJycpXHdcJChwcm9tcHRfZ2V0X2dpdF9icmFuY2ggdHJ1ZSlcJChwcm9tcHRfZ2V0X21pbmd3NjQgdHJ1ZSlcYVxdJFBTMSIKICAgIDs7CiopCiAgICA7Owplc2FjCgoKIyBlbmFibGUgcHJvZ3JhbW1hYmxlIGNvbXBsZXRpb24gZmVhdHVyZXMKaWYgISBzaG9wdCAtb3EgcG9zaXg7IHRoZW4KICAgIGlmIFsgLWYgL3Vzci9zaGFyZS9iYXNoLWNvbXBsZXRpb24vYmFzaF9jb21wbGV0aW9uIF07IHRoZW4KICAgICAgICAuIC91c3Ivc2hhcmUvYmFzaC1jb21wbGV0aW9uL2Jhc2hfY29tcGxldGlvbgogICAgZWxpZiBbIC1mIC9ldGMvYmFzaF9jb21wbGV0aW9uIF07IHRoZW4KICAgICAgICAuIC9ldGMvYmFzaF9jb21wbGV0aW9uCiAgICBmaQpmaQoKZXhwb3J0IFBZVEhPTkRPTlRXUklURUJZVEVDT0RFPTEKCiNBdXRvbWF0aWNhbGx5IGRpc3BsYXkgY29sdW1uIG5hbWVzIGluIHNxbGl0ZSBjbGkgYW5kIGFkZCBjb2xvciB0byBwcm9tcHQKI1VuZm9ydHVuYXRlbHkgbWF4IHNxbGl0ZSBwcm9tcHQgbGVuZ3RoIGlzIDE4IGNoYXJzIChpbmNsdWRpbmcgZXNjYXBlIGNoYXJzKSBzbyB3ZSBjYW4gb25seSBoYXZlIDUgY2hhcnMgbWF4IGRpc3BsYXllZAppZiBbWyAtZiAiJEhPTUUvLnNxbGl0ZXJjIiBdXSAmJiBbWyAkKHN0YXQgLWMgJVkgIiRIT01FLy5zcWxpdGVyYyIpIC1nZSAxNzkzMDgzMDk1IF1dOyB0aGVuCiAgICA6ICMgQWxyZWFkeSB1cCB0byBkYXRlCmVsaWYgISBjb21tYW5kIC12ICdzcWxpdGUzJyA+L2Rldi9udWxsOyB0aGVuCiAgICA6ICMgc3FsaXRlMyBpcyBub3QgaW5zdGFsbGVkCmVsc2UKICAgIG1rZGlyIC1wICIkKGRpcm5hbWUgIiRIT01FLy5zcWxpdGVyYyIpIgogICAgZWNobyAnTFMxT2IzUmxPaUIwYUdseklHbHpJR0YxZEc5dFlYUnBZMkZzYkhrZ1oyVnVaWEpoZEdWa0lHRnVaQ0J2ZG1WeWQzSnBkSFJsYmlCaWVTQXVZbUZ6YUhKakNpNW9aV0ZrWlhKeklFOU9DaTV0YjJSbElHTnZiSFZ0Ym5NS0xtNTFiR3gyWVd4MVpTQThUbFZNVEQ0S0xuQnliMjF3ZENBaUFSdGJPVEp0QW5OeGJBRWJXekJ0QWo0Z0lpQWlBUnRiTXpadEFpNHVMZ0ViV3pCdEFqNGdJZ289JyB8IGJhc2U2NCAtZCA+ICIkSE9NRS8uc3FsaXRlcmMiCiAgICBlY2hvICdbLmJhc2hyY10gQWRkZWQgLnNxbGl0ZXJjJwpmaQoKI0FkZCBjb2xvciB0byBteXNxbCBwcm9tcHQ6ICJteXNxbCB1c2VyOmRhdGFiYXNlPiAiCiNcMDAxIGFuZCBcMDAyIGRlbGltaXQgbm9uLXByaW50aW5nIGNoYXJhY3RlcnMsIHNvIHRoYXQgcmVhZGxpbmUvZWRpdGxpbmUgY29tcHV0ZXMgdGhlIHByb21wdCBsZW5ndGggY29ycmVjdGx5CmV4cG9ydCBNWVNRTF9QUzE9JCdcMDAxXGVbMDE7MzVtXDAwMm15c3FsXDAwMVxlWzBtXDAwMiBcMDAxXGVbMDE7MzJtXDAwMlxcdVwwMDFcZVswbVwwMDI6XDAwMVxlWzAxOzM0bVwwMDJcXGRcMDAxXGVbMG1cMDAyPiAnCgojQWRkIGNvbG9yIHRvIG1vbmdvZGIgcHJvbXB0LiBEaXNhYmxlZCBhcyBJIGRvbid0IHVzZSBtb25nb2RiIGNsaQojY2F0IDw8IEVPRiA+IH4vLm1vbmdvcmMuanMKIy8vTm90ZTogdGhpcyBpcyBhdXRvbWF0aWNhbGx5IGdlbmVyYXRlZCBhbmQgb3ZlcndyaXR0ZW4gYnkgLmJhc2hyYwojcHJvbXB0ID0gKCkgPT4gIlx1MDAxYls5Mm0iK2RiLmdldE5hbWUoKSsiXHUwMDFiWzBtPiI7CiNFT0YKCmlmIFtbIC1mICIkSE9NRS8udmltcmMiIF1dICYmIFtbICQoc3RhdCAtYyAlWSAiJEhPTUUvLnZpbXJjIikgLWdlIDE3OTMwODQwMzIgXV07IHRoZW4KICAgIDogIyBBbHJlYWR5IHVwIHRvIGRhdGUKZWxzZQogICAgbWtkaXIgLXAgIiQoZGlybmFtZSAiJEhPTUUvLnZpbXJjIikiCiAgICBlY2hvICdJazV2ZEdVNklIUm9hWE1nYVhNZ1lYVjBiMjFoZEdsallXeHNlU0JuWlc1bGNtRjBaV1FnWVc1a0lHOTJaWEozY21sMGRHVnVJR0o1SUM1aVlYTm9jbU1LQ2lJZ1VtVnZjR1Z1SUhSb1pTQnNZWE4wSUdWa2FYUmxaQ0J3YjNOcGRHbHZiaUJwYmlCbWFXeGxjd3BoZFNCQ2RXWlNaV0ZrVUc5emRDQXFJR2xtSUd4cGJtVW9JaWRjSWlJcElENGdNU0FtSmlCc2FXNWxLQ0luWENJaUtTQThQU0JzYVc1bEtDSWtJaWtnZkNCbGVHVWdJbTV2Y20xaGJDRWdaeWRjSWlJZ2ZDQmxibVJwWmdvaVUzbHVkR0Y0SUdOdmJHOXlZWFJwYjI0S2MzbHVkR0Y0SUc5dUNpSk1iMkZrSUhCc2RXZHBibk1nWW1GelpXUWdiMjRnWm1sc1pTQjBlWEJsQ21acGJHVjBlWEJsSUc5dUNpSkVhWE53YkdGNUlHeHBibVVnYm5WdFltVnljeTRnVkc5a2J6b2dkRzl2SUdScGMzUnlZV04wYVc1bkxnb2ljMlYwSUc1MWJXSmxjZ29pU1c1elpYSjBjeUJ6Y0dGalpYTWdkMmhsYmlCd2NtVnpjMmx1WnlCMGFHVWdkR0ZpSUd0bGVRcHpaWFFnWlhod1lXNWtkR0ZpQ2lKVFpYUWdkR0ZpSUhkcFpIUm9JSFJ2SURRZ2MzQmhZMlZ6Q25ObGRDQjBZV0p6ZEc5d1BUUUtjMlYwSUhOdlpuUjBZV0p6ZEc5d1BUUUtjMlYwSUhOb2FXWjBkMmxrZEdnOU5Bb0tJa1J2SUc1dmRDQmpiMjUwYVc1MVpTQmpiMjF0Wlc1MElIZG9aVzRnY0hKbGMzTnBibWNnUlc1MFpYSUtZWFYwYjJOdFpDQkdhV3hsVkhsd1pTQXFJSE5sZENCbWIzSnRZWFJ2Y0hScGIyNXpMVDFqY204S0NpSkVhWE5oWW14bElHRjFkRzlwYm1SbGJuUXNJR0Z6SUdsMElHMWxjM05sY3lCMWNDQndZWE4wYVc1bkNtWnBiR1YwZVhCbElHbHVaR1Z1ZENCdlptWUtjMlYwSUc1dllYVjBiMmx1WkdWdWRBcHpaWFFnYm05amFXNWtaVzUwQ25ObGRDQnViM050WVhKMGFXNWtaVzUwQ25ObGRDQnBibVJsYm5SbGVIQnlKZ29LSWtocFoyaHNhV2RvZENCdFlYUmphR2x1WnlCaWNtRmphMlYwY3dwelpYUWdjMmh2ZDIxaGRHTm9DZ29pUTJGelpTQnBibk5sYm5OcGRHbDJaU0J0WVhSamFHbHVaeUJwYmlCelpXRnlZMmdLYzJWMElHbG5ibTl5WldOaGMyVUtjMlYwSUhOdFlYSjBZMkZ6WlFvaVNHbG5hR3hwWjJoMElITmxZWEpqYUNCdFlYUmphR1Z6Q25ObGRDQm9iSE5sWVhKamFBb0tJa0ZzYkc5M0lITmxiR1ZqZEdsdVp5QjNhWFJvSUhSb1pTQnRiM1Z6WlFwelpYUWdiVzkxYzJVOVlRb0tJbFJvWlNCbWIyeHNiM2RwYm1jZ2FYTWdibTl5YldGc2JIa2dhVzRnWkdWaWFXRnVMblpwYlNCaWRYUWdhWFFnWkc5bGN5QnViM1FnWjJWMElITnZkWEpqWldRZ2FXWWdkbWx0Y21NZ1pYaHBjM1J6Q2dwelpYUWdibTlqYjIxd1lYUnBZbXhsQ1NJZ1ZYTmxJRlpwYlNCa1pXWmhkV3gwY3lCcGJuTjBaV0ZrSUc5bUlERXdNQ1VnZG1rZ1kyOXRjR0YwYVdKcGJHbDBlUXB6WlhRZ1ltRmphM053WVdObFBXbHVaR1Z1ZEN4bGIyd3NjM1JoY25RSklpQnRiM0psSUhCdmQyVnlablZzSUdKaFkydHpjR0ZqYVc1bkNuTmxkQ0JvYVhOMGIzSjVQVFV3Q1FraUlHdGxaWEFnTlRBZ2JHbHVaWE1nYjJZZ1kyOXRiV0Z1WkNCc2FXNWxJR2hwYzNSdmNua0tjMlYwSUhKMWJHVnlDUWtpSUhOb2IzY2dkR2hsSUdOMWNuTnZjaUJ3YjNOcGRHbHZiaUJoYkd3Z2RHaGxJSFJwYldVS2MyVjBJRzV2Ylc5a1pXeHBibVVLSWlCVGRXWm1hWGhsY3lCMGFHRjBJR2RsZENCc2IzZGxjaUJ3Y21sdmNtbDBlU0IzYUdWdUlHUnZhVzVuSUhSaFlpQmpiMjF3YkdWMGFXOXVJR1p2Y2lCbWFXeGxibUZ0WlhNdUNpSWdWR2hsYzJVZ1lYSmxJR1pwYkdWeklIZGxJR0Z5WlNCdWIzUWdiR2xyWld4NUlIUnZJSGRoYm5RZ2RHOGdaV1JwZENCdmNpQnlaV0ZrTGdwelpYUWdjM1ZtWm1sNFpYTTlMbUpoYXl4K0xDNXpkM0FzTG04c0xtbHVabThzTG1GMWVDd3ViRzluTEM1a2Rta3NMbUppYkN3dVlteG5MQzVpY21Zc0xtTmlMQzVwYm1Rc0xtbGtlQ3d1YVd4bkxDNXBibmdzTG05MWRDd3VkRzlqQ2dvaUlGZGxJR3R1YjNjZ2VIUmxjbTB0WkdWaWFXRnVJR2x6SUdFZ1kyOXNiM0lnZEdWeWJXbHVZV3dLYVdZZ0puUmxjbTBnUFg0Z0luaDBaWEp0TFdSbFltbGhiaUlnZkh3Z0puUmxjbTBnUFg0Z0luaDBaWEp0TFhobWNtVmxPRFlpQ2lBZ2MyVjBJSFJmUTI4OU1UWUtJQ0J6WlhRZ2RGOVRaajBiV3pNbFpHMEtJQ0J6WlhRZ2RGOVRZajBiV3pRbFpHMEtaVzVrYVdZS0NpSWdVMjl0WlNCRVpXSnBZVzR0YzNCbFkybG1hV01nZEdocGJtZHpDbWxtSUdoaGN5Z25aM1ZwSnlrS0lDQWlJRTExYzNRZ1pHVm1hVzVsSUhSb2FYTWdkMmwwYUdsdUlIUm9aU0E2YVdZZ2MyOGdhWFFnWkc5bGN5QnViM1FnWTJGMWMyVWdjSEp2WW14bGJYTWdkMmwwYUFvZ0lDSWdkbWx0TFhScGJua2dLSGRvYVdOb0lHUnZaWE1nYm05MElHaGhkbVVnSzJWMllXd3BDaUFnWm5WdVkzUnBiMjRoSUR4VFNVUStUV0Z3UlhocGMzUnpLRzVoYldVc0lHMXZaR1Z6S1FvZ0lDQWdabTl5SUcxdlpHVWdhVzRnYzNCc2FYUW9ZVHB0YjJSbGN5d2dKMXg2Y3ljcENpQWdJQ0FnSUdsbUlDRmxiWEIwZVNodFlYQmhjbWNvWVRwdVlXMWxMQ0J0YjJSbEtTa0tJQ0FnSUNBZ0lDQnlaWFIxY200Z01Rb2dJQ0FnSUNCbGJtUnBaZ29nSUNBZ1pXNWtabTl5Q2lBZ0lDQnlaWFIxY200Z01Bb2dJR1Z1WkdaMWJtTjBhVzl1Q2dvZ0lDSWdUV0ZyWlNCemFHbG1kQzFwYm5ObGNuUWdkMjl5YXlCc2FXdGxJR2x1SUZoMFpYSnRDaUFnWVhWMGIyTnRaQ0JIVlVsRmJuUmxjaUFxSUdsbUlDRThVMGxFUGsxaGNFVjRhWE4wY3lnaVBGTXRTVzV6WlhKMFBpSXNJQ0p1ZG5Odklpa2dmQ0JsZUdWamRYUmxJQ0p0WVhBZ1BGTXRTVzV6WlhKMFBpQThUV2xrWkd4bFRXOTFjMlUrSWlCOElHVnVaR2xtQ2lBZ1lYVjBiMk50WkNCSFZVbEZiblJsY2lBcUlHbG1JQ0U4VTBsRVBrMWhjRVY0YVhOMGN5Z2lQRk10U1c1elpYSjBQaUlzSUNKcFl5SXBJSHdnWlhobFkzVjBaU0FpYldGd0lTQThVeTFKYm5ObGNuUStJRHhOYVdSa2JHVk5iM1Z6WlQ0aUlId2daVzVrYVdZS1pXNWthV1lLQ2lJZ1UyVjBJSEJoY0dWeUlITnBlbVVnWm5KdmJTQXZaWFJqTDNCaGNHVnljMmw2WlNCcFppQmhkbUZwYkdGaWJHVWdLRVJsWW1saGJpMXpjR1ZqYVdacFl5a0thV1lnWm1sc1pYSmxZV1JoWW14bEtDSXZaWFJqTDNCaGNHVnljMmw2WlNJcENpQWdiR1YwSUhNNmNHRndaWEp6YVhwbElEMGdiV0YwWTJoemRISW9jbVZoWkdacGJHVW9KeTlsZEdNdmNHRndaWEp6YVhwbEp5d2dKeWNzSURFcExDQW5YSEFxSnlrS0lDQnBaaUJ6ZEhKc1pXNG9jenB3WVhCbGNuTnBlbVVwQ2lBZ0lDQmxlR1VnSW5ObGRDQndjbWx1ZEc5d2RHbHZibk1yUFhCaGNHVnlPaUlnTGlCek9uQmhjR1Z5YzJsNlpRb2dJR1Z1WkdsbUNtVnVaR2xtQ2c9PScgfCBiYXNlNjQgLWQgPiAiJEhPTUUvLnZpbXJjIgogICAgZWNobyAnWy5iYXNocmNdIEFkZGVkIC52aW1yYycKZmkK')
+$writeFileContent = [Convert]::FromBase64String('IyEvYmluL2Jhc2gKIyAuYmFzaHJjIHZlcnNpb24gMjAyNi0xMC0yOAojIGN1cmwgemV6LmRldiAtTG8gLmJhc2hyYwojIHdnZXQgemV6LmRldiAtTyAuYmFzaHJjCgojIElmIG5vdCBydW5uaW5nIGludGVyYWN0aXZlbHksIGRvbid0IGRvIGFueXRoaW5nCmNhc2UgJC0gaW4KICAgICppKikgOzsKICAgICAgKikgcmV0dXJuOzsKZXNhYwoKCkhJU1RDT05UUk9MPWlnbm9yZWJvdGggIyBkb24ndCBwdXQgZHVwbGljYXRlIGxpbmVzIG9yIGxpbmVzIHN0YXJ0aW5nIHdpdGggc3BhY2UgaW4gdGhlIGhpc3RvcnkKc2hvcHQgLXMgaGlzdGFwcGVuZCAjIGFwcGVuZCB0byB0aGUgaGlzdG9yeSBmaWxlLCBkb24ndCBvdmVyd3JpdGUgaXQKI1tbICRQUk9NUFRfQ09NTUFORCA9PSAqImhpc3RvcnkgLWEiKiBdXSB8fCBQUk9NUFRfQ09NTUFORD0iaGlzdG9yeSAtYSR7UFJPTVBUX0NPTU1BTkQ6KzsgJFBST01QVF9DT01NQU5EfSIgIyB3cml0ZSBlYWNoIGNvbW1hbmQgdG8gdGhlIGhpc3RvcnkgZmlsZSBvbmNlIGl0IGZpbmlzaGVzLCBpbnN0ZWFkIG9mIG9uIGV4aXQsIHNvIHRoYXQgaXQgaXMgbm90IGxvc3QgaWYgdGhlIHRlcm1pbmFsIGlzIGtpbGxlZCAtIGRpc2FibGVkIGZvciBub3cgZm9yIHRlc3RpbmcKCkhJU1RTSVpFPTEwMDAKSElTVEZJTEVTSVpFPTIwMDAKCnNob3B0IC1zIGNoZWNrd2luc2l6ZSAjIGNoZWNrIHRoZSB3aW5kb3cgc2l6ZSBhZnRlciBlYWNoIGNvbW1hbmQgYW5kLCBpZiBuZWNlc3NhcnksIHVwZGF0ZSB0aGUgdmFsdWVzIG9mIExJTkVTIGFuZCBDT0xVTU5TLgpzaG9wdCAtcyBnbG9ic3RhciAjYWxsb3cgKiogaW4gZ2xvYgpzaG9wdCAtcyBleHRnbG9iICNhbGxvdyBleHRlbmRlZCBnbG9iIG1hdGNoaW5nIHN1Y2ggYXMgPyhwYXR0ZXJuKSwgKihwYXR0ZXJuKSwgZXRjCnNob3B0IC1zIGRvdGdsb2IgI2FsbG93IGdsb2JiaW5nIHRvIG1hdGNoIGhpZGRlbiBmaWxlcyAoZmlsZXMgc3RhcnRpbmcgd2l0aCBhIGRvdCkKc2V0ICtIICNkaXNhYmxlICIhIiBleHBhbmRpbmcgdG8gaGlzdG9yeQoKI0F2b2lkIC4qIG1hdGNoaW5nIC4gYW5kIC4uCkdMT0JJR05PUkU9Ii46Li4iCgojZGlzYWJsZSBhcyBpdCBjYXVzZXMgcHJvYmxlbXMgd2l0aCBzY3AgYXV0b2NvbXBsZXRpb24KI3Nob3B0IC1zIGZhaWxnbG9iICNpZiBkb2luZyBscyAqbm9tYXRjaCosIGl0IHdpbGwgY2F1c2UgYW4gZXJyb3IgaW5zdGVhZCBvZiBwYXNzaW5nICIqbm9tYXRjaCoiIHRvIGxzCgojIGVuYWJsZSBjb2xvciBzdXBwb3J0IG9mIGxzIGFuZCBhbHNvIGFkZCBoYW5keSBhbGlhc2VzCmlmIFsgLXggL3Vzci9iaW4vZGlyY29sb3JzIF07IHRoZW4KICAgIHRlc3QgLXIgfi8uZGlyY29sb3JzICYmIGV2YWwgIiQoZGlyY29sb3JzIC1iIH4vLmRpcmNvbG9ycykiIHx8IGV2YWwgIiQoZGlyY29sb3JzIC1iKSIKICAgIGFsaWFzIGxzPSdscyAtLWNvbG9yPWF1dG8nCiAgICBhbGlhcyBkaXI9J2RpciAtLWNvbG9yPWF1dG8nCiAgICBhbGlhcyB2ZGlyPSd2ZGlyIC0tY29sb3I9YXV0bycKCiAgICBhbGlhcyBncmVwPSdncmVwIC0tY29sb3I9YXV0bycKICAgIGFsaWFzIGZncmVwPSdmZ3JlcCAtLWNvbG9yPWF1dG8nCiAgICBhbGlhcyBlZ3JlcD0nZWdyZXAgLS1jb2xvcj1hdXRvJwpmaQoKIyBjb2xvcmVkIEdDQyB3YXJuaW5ncyBhbmQgZXJyb3JzCmV4cG9ydCBHQ0NfQ09MT1JTPSdlcnJvcj0wMTszMTp3YXJuaW5nPTAxOzM1Om5vdGU9MDE7MzY6Y2FyZXQ9MDE7MzI6bG9jdXM9MDE6cXVvdGU9MDEnCgphbGlhcyBsbD0nbHMgLWxhRicKCiNTYW1lIGFzIGdhY3AgaW4gcHJvZmlsZS5wczEKaWYgY29tbWFuZCAtdiBnaXQgPi9kZXYvbnVsbDsgdGhlbgogICAgZ2FjcCgpIHsgZ2l0IGFkZCAtQSAmJiBnaXQgY29tbWl0IC0tYWxsb3ctZW1wdHktbWVzc2FnZSAtbSAiJDEiICYmIGdpdCBwdXNoOyB9CmZpCgppZiBbIC1mIH4vLmJhc2hfYWxpYXNlcyBdOyB0aGVuCiAgICAuIH4vLmJhc2hfYWxpYXNlcwpmaQoKCiMgc2V0IHZhcmlhYmxlIGlkZW50aWZ5aW5nIHRoZSBjaHJvb3QgeW91IHdvcmsgaW4gKHVzZWQgaW4gdGhlIHByb21wdCBiZWxvdykKaWYgWyAteiAiJHtkZWJpYW5fY2hyb290Oi19IiBdICYmIFsgLXIgL2V0Yy9kZWJpYW5fY2hyb290IF07IHRoZW4KICAgIGRlYmlhbl9jaHJvb3Q9JChjYXQgL2V0Yy9kZWJpYW5fY2hyb290KQpmaQoKcHJvbXB0X2dldF9naXRfYnJhbmNoKCkgewogICAgdGl0bGU9JDEKICAgIF9QUk9NUFRfQ1VSUkVOVF9HSVRfQlJBTkNIPSQoZ2l0IHJldi1wYXJzZSAtLWFiYnJldi1yZWYgSEVBRCAyPi9kZXYvbnVsbCkKICAgIGlmIFtbICRfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSCA9PSAiSEVBRCIgXV07IHRoZW4KICAgICAgICAjSWYgY2hlY2tpbmcgb3V0IGEgc3BlY2lmaWMgY29tbWl0LCB3ZSBuZWVkIHRvIHVzZSAtLXNob3J0CiAgICAgICAgX1BST01QVF9DVVJSRU5UX0dJVF9CUkFOQ0g9JChnaXQgcmV2LXBhcnNlIC0tc2hvcnQgSEVBRCAyPi9kZXYvbnVsbCkKICAgIGZpCiAgICBpZiBbWyAhIC16ICRfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSCAmJiAkX1BST01QVF9DVVJSRU5UX0dJVF9CUkFOQ0ggIT0gIm1haW4iICYmICRfUFJPTVBUX0NVUlJFTlRfR0lUX0JSQU5DSCAhPSAibWFzdGVyIiBdXTsgdGhlbgogICAgICAgIGlmIFtbICR0aXRsZSA9PSAidHJ1ZSIgXV07IHRoZW4KICAgICAgICAgICAgX1BST01QVF9DVVJSRU5UX0dJVF9CUkFOQ0g9IigkX1BST01QVF9DVVJSRU5UX0dJVF9CUkFOQ0gpIgogICAgICAgIGZpCiAgICAgICAgX1BST01QVF9DVVJSRU5UX0dJVF9CUkFOQ0g9IiAkX1BST01QVF9DVVJSRU5UX0dJVF9CUkFOQ0giCiAgICBlbHNlCiAgICAgICAgX1BST01QVF9DVVJSRU5UX0dJVF9CUkFOQ0g9IiIKICAgIGZpCiAgICBlY2hvICIkX1BST01QVF9DVVJSRU5UX0dJVF9CUkFOQ0giCn0KCnByb21wdF9nZXRfbWluZ3c2NCgpIHsKICAgIHRpdGxlPSQxCiAgICBpZiBbWyAiJE1TWVNURU0iID09ICJNSU5HVzY0IiBdXTsgdGhlbgogICAgICAgIGlmIFtbICR0aXRsZSA9PSAidHJ1ZSIgXV07IHRoZW4KICAgICAgICAgICAgZWNobyAiIC0gTUlOR1c2NCIKICAgICAgICBlbGlmIFtbIC16ICIkU1NIX0NPTk5FQ1RJT04iIF1dOyB0aGVuCiAgICAgICAgICAgIGVjaG8gIk1JTkdXNjQiCiAgICAgICAgZWxzZQogICAgICAgICAgICBlY2hvICIgTUlOR1c2NCIKICAgICAgICBmaQogICAgZWxzZQogICAgICAgIGVjaG8gIiIKICAgIGZpCn0KCnByb21wdF9kaXNwbGF5X3VzZXJfaG9zdG5hbWUoKSB7CiAgICAjIERpc3BsYXkgdXNlckBob3N0bmFtZSwgdW5sZXNzIHdlIGFyZSBpbiBtaW5ndzY0IChnaXQgYmFzaCkgYW5kIG5vdCBpbiBzc2gKICAgIGlmIFtbICIkTVNZU1RFTSIgPT0gIk1JTkdXNjQiICYmIC16ICIkU1NIX0NPTk5FQ1RJT04iIF1dOyB0aGVuCiAgICAgICAgcmV0dXJuIDEKICAgIGVsc2UKICAgICAgICByZXR1cm4gMAogICAgZmkKfQoKUFJPTVBUX0hPU1ROQU1FPSR7UFJPTVBUX0hPU1ROQU1FOi0kSE9TVE5BTUV9CgppZiBbWyAkTVNZU1RFTSA9PSAiTUlOR1c2NCIgXV07IHRoZW4KICAgIFBTMT0nJHtkZWJpYW5fY2hyb290OisoJGRlYmlhbl9jaHJvb3QpfVxbXDAzM1swMTszNW1cXSQocHJvbXB0X2Rpc3BsYXlfdXNlcl9ob3N0bmFtZSAmJiBlY2hvICJcdUAkUFJPTVBUX0hPU1ROQU1FICIgfHwgZWNobyAnJylcW1wwMzNbMG1cMDMzWzkybVxdTUlOR1c2NFxbXDAzM1swbVxdIFxbXDAzM1swMTszNG1cXVx3XFtcMDMzWzAxOzM2bVxdJChwcm9tcHRfZ2V0X2dpdF9icmFuY2gpXFtcMDMzWzAwbVxdPiAnCmVsc2UKCiAgICBQUzE9JyR7ZGViaWFuX2Nocm9vdDorKCRkZWJpYW5fY2hyb290KX1cW1wwMzNbMDE7MzJtXF1cdUAkUFJPTVBUX0hPU1ROQU1FXFtcMDMzWzBtXF06XFtcMDMzWzAxOzM0bVxdXHdcW1wwMzNbMDE7MzVtXF0kKHByb21wdF9nZXRfZ2l0X2JyYW5jaClcW1wwMzNbMDBtXF1cJCAnCmZpCgojIElmIHRoaXMgaXMgYW4geHRlcm0gc2V0IHRoZSB0aXRsZSB0byB1c2VyQGhvc3Q6IGRpciA8YnJhbmNoPgpjYXNlICIkVEVSTSIgaW4KeHRlcm0qfHJ4dnQqKQogICAgUFMxPSJcW1xlXTA7JHtkZWJpYW5fY2hyb290OisoJGRlYmlhbl9jaHJvb3QpfVwkKHByb21wdF9kaXNwbGF5X3VzZXJfaG9zdG5hbWUgJiYgZWNobyAnXHVAJFBST01QVF9IT1NUTkFNRTogJyB8fCBlY2hvICcnKVx3XCQocHJvbXB0X2dldF9naXRfYnJhbmNoIHRydWUpXCQocHJvbXB0X2dldF9taW5ndzY0IHRydWUpXGFcXSRQUzEiCiAgICA7OwoqKQogICAgOzsKZXNhYwoKCiMgZW5hYmxlIHByb2dyYW1tYWJsZSBjb21wbGV0aW9uIGZlYXR1cmVzCmlmICEgc2hvcHQgLW9xIHBvc2l4OyB0aGVuCiAgICBpZiBbIC1mIC91c3Ivc2hhcmUvYmFzaC1jb21wbGV0aW9uL2Jhc2hfY29tcGxldGlvbiBdOyB0aGVuCiAgICAgICAgLiAvdXNyL3NoYXJlL2Jhc2gtY29tcGxldGlvbi9iYXNoX2NvbXBsZXRpb24KICAgIGVsaWYgWyAtZiAvZXRjL2Jhc2hfY29tcGxldGlvbiBdOyB0aGVuCiAgICAgICAgLiAvZXRjL2Jhc2hfY29tcGxldGlvbgogICAgZmkKZmkKCmV4cG9ydCBQWVRIT05ET05UV1JJVEVCWVRFQ09ERT0xCgojQXV0b21hdGljYWxseSBkaXNwbGF5IGNvbHVtbiBuYW1lcyBpbiBzcWxpdGUgY2xpIGFuZCBhZGQgY29sb3IgdG8gcHJvbXB0CiNVbmZvcnR1bmF0ZWx5IG1heCBzcWxpdGUgcHJvbXB0IGxlbmd0aCBpcyAxOCBjaGFycyAoaW5jbHVkaW5nIGVzY2FwZSBjaGFycykgc28gd2UgY2FuIG9ubHkgaGF2ZSA1IGNoYXJzIG1heCBkaXNwbGF5ZWQKaWYgW1sgLWYgIiRIT01FLy5zcWxpdGVyYyIgXV0gJiYgW1sgJChzdGF0IC1jICVZICIkSE9NRS8uc3FsaXRlcmMiKSAtZ2UgMTc5MzA4MzA5NSBdXTsgdGhlbgogICAgOiAjIEFscmVhZHkgdXAgdG8gZGF0ZQplbGlmICEgY29tbWFuZCAtdiAnc3FsaXRlMycgPi9kZXYvbnVsbDsgdGhlbgogICAgOiAjIHNxbGl0ZTMgaXMgbm90IGluc3RhbGxlZAplbHNlCiAgICBta2RpciAtcCAiJChkaXJuYW1lICIkSE9NRS8uc3FsaXRlcmMiKSIKICAgIGVjaG8gJ0xTMU9iM1JsT2lCMGFHbHpJR2x6SUdGMWRHOXRZWFJwWTJGc2JIa2daMlZ1WlhKaGRHVmtJR0Z1WkNCdmRtVnlkM0pwZEhSbGJpQmllU0F1WW1GemFISmpDaTVvWldGa1pYSnpJRTlPQ2k1dGIyUmxJR052YkhWdGJuTUtMbTUxYkd4MllXeDFaU0E4VGxWTVRENEtMbkJ5YjIxd2RDQWlBUnRiT1RKdEFuTnhiQUViV3pCdEFqNGdJaUFpQVJ0Yk16WnRBaTR1TGdFYld6QnRBajRnSWdvPScgfCBiYXNlNjQgLWQgPiAiJEhPTUUvLnNxbGl0ZXJjIgogICAgZWNobyAnWy5iYXNocmNdIEFkZGVkIC5zcWxpdGVyYycKZmkKCiNBZGQgY29sb3IgdG8gbXlzcWwgcHJvbXB0OiAibXlzcWwgdXNlcjpkYXRhYmFzZT4gIgojXDAwMSBhbmQgXDAwMiBkZWxpbWl0IG5vbi1wcmludGluZyBjaGFyYWN0ZXJzLCBzbyB0aGF0IHJlYWRsaW5lL2VkaXRsaW5lIGNvbXB1dGVzIHRoZSBwcm9tcHQgbGVuZ3RoIGNvcnJlY3RseQpleHBvcnQgTVlTUUxfUFMxPSQnXDAwMVxlWzAxOzM1bVwwMDJteXNxbFwwMDFcZVswbVwwMDIgXDAwMVxlWzAxOzMybVwwMDJcXHVcMDAxXGVbMG1cMDAyOlwwMDFcZVswMTszNG1cMDAyXFxkXDAwMVxlWzBtXDAwMj4gJwoKI0FkZCBjb2xvciB0byBtb25nb2RiIHByb21wdC4gRGlzYWJsZWQgYXMgSSBkb24ndCB1c2UgbW9uZ29kYiBjbGkKI2NhdCA8PCBFT0YgPiB+Ly5tb25nb3JjLmpzCiMvL05vdGU6IHRoaXMgaXMgYXV0b21hdGljYWxseSBnZW5lcmF0ZWQgYW5kIG92ZXJ3cml0dGVuIGJ5IC5iYXNocmMKI3Byb21wdCA9ICgpID0+ICJcdTAwMWJbOTJtIitkYi5nZXROYW1lKCkrIlx1MDAxYlswbT4iOwojRU9GCgppZiBbWyAtZiAiJEhPTUUvLnZpbXJjIiBdXSAmJiBbWyAkKHN0YXQgLWMgJVkgIiRIT01FLy52aW1yYyIpIC1nZSAxNzkzMDg0MDMyIF1dOyB0aGVuCiAgICA6ICMgQWxyZWFkeSB1cCB0byBkYXRlCmVsc2UKICAgIG1rZGlyIC1wICIkKGRpcm5hbWUgIiRIT01FLy52aW1yYyIpIgogICAgZWNobyAnSWs1dmRHVTZJSFJvYVhNZ2FYTWdZWFYwYjIxaGRHbGpZV3hzZVNCblpXNWxjbUYwWldRZ1lXNWtJRzkyWlhKM2NtbDBkR1Z1SUdKNUlDNWlZWE5vY21NS0NpSWdVbVZ2Y0dWdUlIUm9aU0JzWVhOMElHVmthWFJsWkNCd2IzTnBkR2x2YmlCcGJpQm1hV3hsY3dwaGRTQkNkV1pTWldGa1VHOXpkQ0FxSUdsbUlHeHBibVVvSWlkY0lpSXBJRDRnTVNBbUppQnNhVzVsS0NJblhDSWlLU0E4UFNCc2FXNWxLQ0lrSWlrZ2ZDQmxlR1VnSW01dmNtMWhiQ0VnWnlkY0lpSWdmQ0JsYm1ScFpnb2lVM2x1ZEdGNElHTnZiRzl5WVhScGIyNEtjM2x1ZEdGNElHOXVDaUpNYjJGa0lIQnNkV2RwYm5NZ1ltRnpaV1FnYjI0Z1ptbHNaU0IwZVhCbENtWnBiR1YwZVhCbElHOXVDaUpFYVhOd2JHRjVJR3hwYm1VZ2JuVnRZbVZ5Y3k0Z1ZHOWtiem9nZEc5dklHUnBjM1J5WVdOMGFXNW5MZ29pYzJWMElHNTFiV0psY2dvaVNXNXpaWEowY3lCemNHRmpaWE1nZDJobGJpQndjbVZ6YzJsdVp5QjBhR1VnZEdGaUlHdGxlUXB6WlhRZ1pYaHdZVzVrZEdGaUNpSlRaWFFnZEdGaUlIZHBaSFJvSUhSdklEUWdjM0JoWTJWekNuTmxkQ0IwWVdKemRHOXdQVFFLYzJWMElITnZablIwWVdKemRHOXdQVFFLYzJWMElITm9hV1owZDJsa2RHZzlOQW9LSWtSdklHNXZkQ0JqYjI1MGFXNTFaU0JqYjIxdFpXNTBJSGRvWlc0Z2NISmxjM05wYm1jZ1JXNTBaWElLWVhWMGIyTnRaQ0JHYVd4bFZIbHdaU0FxSUhObGRDQm1iM0p0WVhSdmNIUnBiMjV6TFQxamNtOEtDaUpFYVhOaFlteGxJR0YxZEc5cGJtUmxiblFzSUdGeklHbDBJRzFsYzNObGN5QjFjQ0J3WVhOMGFXNW5DbVpwYkdWMGVYQmxJR2x1WkdWdWRDQnZabVlLYzJWMElHNXZZWFYwYjJsdVpHVnVkQXB6WlhRZ2JtOWphVzVrWlc1MENuTmxkQ0J1YjNOdFlYSjBhVzVrWlc1MENuTmxkQ0JwYm1SbGJuUmxlSEJ5SmdvS0lraHBaMmhzYVdkb2RDQnRZWFJqYUdsdVp5QmljbUZqYTJWMGN3cHpaWFFnYzJodmQyMWhkR05vQ2dvaVEyRnpaU0JwYm5ObGJuTnBkR2wyWlNCdFlYUmphR2x1WnlCcGJpQnpaV0Z5WTJnS2MyVjBJR2xuYm05eVpXTmhjMlVLYzJWMElITnRZWEowWTJGelpRb2lTR2xuYUd4cFoyaDBJSE5sWVhKamFDQnRZWFJqYUdWekNuTmxkQ0JvYkhObFlYSmphQW9LSWtGc2JHOTNJSE5sYkdWamRHbHVaeUIzYVhSb0lIUm9aU0J0YjNWelpRcHpaWFFnYlc5MWMyVTlZUW9LSWxSb1pTQm1iMnhzYjNkcGJtY2dhWE1nYm05eWJXRnNiSGtnYVc0Z1pHVmlhV0Z1TG5acGJTQmlkWFFnYVhRZ1pHOWxjeUJ1YjNRZ1oyVjBJSE52ZFhKalpXUWdhV1lnZG1sdGNtTWdaWGhwYzNSekNncHpaWFFnYm05amIyMXdZWFJwWW14bENTSWdWWE5sSUZacGJTQmtaV1poZFd4MGN5QnBibk4wWldGa0lHOW1JREV3TUNVZ2Rta2dZMjl0Y0dGMGFXSnBiR2wwZVFwelpYUWdZbUZqYTNOd1lXTmxQV2x1WkdWdWRDeGxiMndzYzNSaGNuUUpJaUJ0YjNKbElIQnZkMlZ5Wm5Wc0lHSmhZMnR6Y0dGamFXNW5Dbk5sZENCb2FYTjBiM0o1UFRVd0NRa2lJR3RsWlhBZ05UQWdiR2x1WlhNZ2IyWWdZMjl0YldGdVpDQnNhVzVsSUdocGMzUnZjbmtLYzJWMElISjFiR1Z5Q1FraUlITm9iM2NnZEdobElHTjFjbk52Y2lCd2IzTnBkR2x2YmlCaGJHd2dkR2hsSUhScGJXVUtjMlYwSUc1dmJXOWtaV3hwYm1VS0lpQlRkV1ptYVhobGN5QjBhR0YwSUdkbGRDQnNiM2RsY2lCd2NtbHZjbWwwZVNCM2FHVnVJR1J2YVc1bklIUmhZaUJqYjIxd2JHVjBhVzl1SUdadmNpQm1hV3hsYm1GdFpYTXVDaUlnVkdobGMyVWdZWEpsSUdacGJHVnpJSGRsSUdGeVpTQnViM1FnYkdsclpXeDVJSFJ2SUhkaGJuUWdkRzhnWldScGRDQnZjaUJ5WldGa0xncHpaWFFnYzNWbVptbDRaWE05TG1KaGF5eCtMQzV6ZDNBc0xtOHNMbWx1Wm04c0xtRjFlQ3d1Ykc5bkxDNWtkbWtzTG1KaWJDd3VZbXhuTEM1aWNtWXNMbU5pTEM1cGJtUXNMbWxrZUN3dWFXeG5MQzVwYm5nc0xtOTFkQ3d1ZEc5akNnb2lJRmRsSUd0dWIzY2dlSFJsY20wdFpHVmlhV0Z1SUdseklHRWdZMjlzYjNJZ2RHVnliV2x1WVd3S2FXWWdKblJsY20wZ1BYNGdJbmgwWlhKdExXUmxZbWxoYmlJZ2ZId2dKblJsY20wZ1BYNGdJbmgwWlhKdExYaG1jbVZsT0RZaUNpQWdjMlYwSUhSZlEyODlNVFlLSUNCelpYUWdkRjlUWmowYld6TWxaRzBLSUNCelpYUWdkRjlUWWowYld6UWxaRzBLWlc1a2FXWUtDaUlnVTI5dFpTQkVaV0pwWVc0dGMzQmxZMmxtYVdNZ2RHaHBibWR6Q21sbUlHaGhjeWduWjNWcEp5a0tJQ0FpSUUxMWMzUWdaR1ZtYVc1bElIUm9hWE1nZDJsMGFHbHVJSFJvWlNBNmFXWWdjMjhnYVhRZ1pHOWxjeUJ1YjNRZ1kyRjFjMlVnY0hKdllteGxiWE1nZDJsMGFBb2dJQ0lnZG1sdExYUnBibmtnS0hkb2FXTm9JR1J2WlhNZ2JtOTBJR2hoZG1VZ0syVjJZV3dwQ2lBZ1puVnVZM1JwYjI0aElEeFRTVVErVFdGd1JYaHBjM1J6S0c1aGJXVXNJRzF2WkdWektRb2dJQ0FnWm05eUlHMXZaR1VnYVc0Z2MzQnNhWFFvWVRwdGIyUmxjeXdnSjF4NmN5Y3BDaUFnSUNBZ0lHbG1JQ0ZsYlhCMGVTaHRZWEJoY21jb1lUcHVZVzFsTENCdGIyUmxLU2tLSUNBZ0lDQWdJQ0J5WlhSMWNtNGdNUW9nSUNBZ0lDQmxibVJwWmdvZ0lDQWdaVzVrWm05eUNpQWdJQ0J5WlhSMWNtNGdNQW9nSUdWdVpHWjFibU4wYVc5dUNnb2dJQ0lnVFdGclpTQnphR2xtZEMxcGJuTmxjblFnZDI5eWF5QnNhV3RsSUdsdUlGaDBaWEp0Q2lBZ1lYVjBiMk50WkNCSFZVbEZiblJsY2lBcUlHbG1JQ0U4VTBsRVBrMWhjRVY0YVhOMGN5Z2lQRk10U1c1elpYSjBQaUlzSUNKdWRuTnZJaWtnZkNCbGVHVmpkWFJsSUNKdFlYQWdQRk10U1c1elpYSjBQaUE4VFdsa1pHeGxUVzkxYzJVK0lpQjhJR1Z1WkdsbUNpQWdZWFYwYjJOdFpDQkhWVWxGYm5SbGNpQXFJR2xtSUNFOFUwbEVQazFoY0VWNGFYTjBjeWdpUEZNdFNXNXpaWEowUGlJc0lDSnBZeUlwSUh3Z1pYaGxZM1YwWlNBaWJXRndJU0E4VXkxSmJuTmxjblErSUR4TmFXUmtiR1ZOYjNWelpUNGlJSHdnWlc1a2FXWUtaVzVrYVdZS0NpSWdVMlYwSUhCaGNHVnlJSE5wZW1VZ1puSnZiU0F2WlhSakwzQmhjR1Z5YzJsNlpTQnBaaUJoZG1GcGJHRmliR1VnS0VSbFltbGhiaTF6Y0dWamFXWnBZeWtLYVdZZ1ptbHNaWEpsWVdSaFlteGxLQ0l2WlhSakwzQmhjR1Z5YzJsNlpTSXBDaUFnYkdWMElITTZjR0Z3WlhKemFYcGxJRDBnYldGMFkyaHpkSElvY21WaFpHWnBiR1VvSnk5bGRHTXZjR0Z3WlhKemFYcGxKeXdnSnljc0lERXBMQ0FuWEhBcUp5a0tJQ0JwWmlCemRISnNaVzRvY3pwd1lYQmxjbk5wZW1VcENpQWdJQ0JsZUdVZ0luTmxkQ0J3Y21sdWRHOXdkR2x2Ym5NclBYQmhjR1Z5T2lJZ0xpQnpPbkJoY0dWeWMybDZaUW9nSUdWdVpHbG1DbVZ1WkdsbUNnPT0nIHwgYmFzZTY0IC1kID4gIiRIT01FLy52aW1yYyIKICAgIGVjaG8gJ1suYmFzaHJjXSBBZGRlZCAudmltcmMnCmZpCgojTWl0aWdhdGUgc3VwcGx5IGNoYWluIGF0dGFja3M6IGRvbid0IGluc3RhbGwgcGFja2FnZSB2ZXJzaW9ucyByZWxlYXNlZCBsZXNzIHRoYW4gNTIgZGF5cyBhZ28gKG1vc3QgbWFsaWNpb3VzIHZlcnNpb25zIGFyZSBkZXRlY3RlZCBhbmQgcmVtb3ZlZCBieSB0aGVuKSwgYW5kIGRvbid0IHJ1biBpbnN0YWxsIHNjcmlwdHMKaWYgW1sgLXogJE1TWVNURU0gXV07IHRoZW4KICAgICNJZiB0aGUgY29uZmlnIGZpbGUgYWxyZWFkeSBleGlzdHMsIHVzZSB0aGUgcHJvZ3JhbSB0byBlZGl0IGl0LCBrZWVwaW5nIHRoZSBvdGhlciBzZXR0aW5ncyAoZWcgYXV0aCB0b2tlbnMpCiAgICAjVGhlIGdsb2JhbCBucG0gY29uZmlnIGlzIHVzdWFsbHkgb25seSB3cml0YWJsZSBieSByb290LiBGb3IgcG5wbSwgLS1sb2NhdGlvbj1nbG9iYWwgaXMgdGhlIGNvbmZpZyBvZiB0aGUgY3VycmVudCB1c2VyCiAgICBpZiBbWyAtZiAiJEhPTUUvLm5wbXJjIiBdXSAmJiBbWyAkKHN0YXQgLWMgJVkgIiRIT01FLy5ucG1yYyIpIC1nZSAxNzkzMTk5Nzk1IF1dOyB0aGVuCiAgICAgICAgOiAjIEFscmVhZHkgdXAgdG8gZGF0ZQogICAgZWxpZiAhIGNvbW1hbmQgLXYgJ25wbScgPi9kZXYvbnVsbDsgdGhlbgogICAgICAgIDogIyBucG0gaXMgbm90IGluc3RhbGxlZAogICAgZWxpZiBbWyAtZiAiJEhPTUUvLm5wbXJjIiBdXTsgdGhlbgogICAgICAgIHsgbnBtIGNvbmZpZyBzZXQgbWluLXJlbGVhc2UtYWdlPTUyIGlnbm9yZS1zY3JpcHRzPXRydWUgYWxsb3ctZ2l0PW5vbmUgLS1sb2NhdGlvbj11c2VyOyB9ICYmIHsgW1sgJEVVSUQgLW5lIDAgXV0gfHwgbnBtIGNvbmZpZyBzZXQgbWluLXJlbGVhc2UtYWdlPTUyIGlnbm9yZS1zY3JpcHRzPXRydWUgYWxsb3ctZ2l0PW5vbmUgLS1sb2NhdGlvbj1nbG9iYWw7IH0gJiYgZWNobyAnWy5iYXNocmNdIFNldCBucG0gc2VjdXJpdHkgc2V0dGluZ3MnCiAgICBlbHNlCiAgICAgICAgbWtkaXIgLXAgIiQoZGlybmFtZSAiJEhPTUUvLm5wbXJjIikiCiAgICAgICAgZWNobyAnSXlCRWIyNG5kQ0JwYm5OMFlXeHNJSEJoWTJ0aFoyVWdkbVZ5YzJsdmJuTWdjbVZzWldGelpXUWdiR1Z6Y3lCMGFHRnVJRFV5SUdSaGVYTWdZV2R2TGlCT1pXVmtjeUJ1Y0cwZ01URXVNVEFyTENCdmJHUmxjaUIyWlhKemFXOXVjeUJrYVhOd2JHRjVJR0VnZDJGeWJtbHVad3B0YVc0dGNtVnNaV0Z6WlMxaFoyVTlOVElLYVdkdWIzSmxMWE5qY21sd2RITTlkSEoxWlFvaklFZHBkQ0JrWlhCbGJtUmxibU5wWlhNZ1lubHdZWE56SUhSb1pTQnlaV2RwYzNSeWVTd2djMjhnYldsdUxYSmxiR1ZoYzJVdFlXZGxJR1J2WlhNZ2JtOTBJR0Z3Y0d4NUlIUnZJSFJvWlcwdUlFUmxabUYxYkhRZ2FXNGdibkJ0SURFeUNtRnNiRzkzTFdkcGREMXViMjVsQ2c9PScgfCBiYXNlNjQgLWQgPiAiJEhPTUUvLm5wbXJjIgogICAgICAgIGVjaG8gJ1suYmFzaHJjXSBTZXQgbnBtIHNlY3VyaXR5IHNldHRpbmdzJwogICAgZmkKICAgICNwbnBtIDExKyByZWFkcyBpdHMgc2V0dGluZ3MgZnJvbSBjb25maWcueWFtbCBpbnN0ZWFkIG9mIHJjLiBJZiBjb25maWcueWFtbCBkb2VzIG5vdCBleGlzdCwgcG5wbSAxMCBpcyBwcmVzdW1hYmx5IGluc3RhbGxlZCwgc28gc2V0IHRoZSBzZXR0aW5ncyBpbiByYyB3aXRoIHRoZSBjb21tYW5kcwogICAgI2NvbmZpZy55YW1sIGlzIHN0aWxsIHdyaXR0ZW4sIHNvIHRoYXQgdGhlIGNvbW1hbmRzIGFyZSBub3QgcnVuIGFnYWluIGFuZCBwbnBtIGlzIGNvbmZpZ3VyZWQgb25jZSB1cGdyYWRlZAogICAgaWYgY29tbWFuZCAtdiBwbnBtID4vZGV2L251bGw7IHRoZW4KICAgICAgICBpZiBbWyAtZiAiJHtYREdfQ09ORklHX0hPTUU6LSRIT01FLy5jb25maWd9L3BucG0vY29uZmlnLnlhbWwiIF1dICYmIFtbICQoc3RhdCAtYyAlWSAiJHtYREdfQ09ORklHX0hPTUU6LSRIT01FLy5jb25maWd9L3BucG0vY29uZmlnLnlhbWwiKSAtZ2UgMTc5MzE5OTc5NiBdXTsgdGhlbgogICAgICAgICAgICA6ICMgQWxyZWFkeSB1cCB0byBkYXRlCiAgICAgICAgZWxpZiBbWyAtZiAiJHtYREdfQ09ORklHX0hPTUU6LSRIT01FLy5jb25maWd9L3BucG0vY29uZmlnLnlhbWwiIF1dOyB0aGVuCiAgICAgICAgICAgIHsgcG5wbSBjb25maWcgc2V0IG1pbmltdW1SZWxlYXNlQWdlIDc0ODgwIC0tbG9jYXRpb249Z2xvYmFsOyB9ICYmIHsgcG5wbSBjb25maWcgc2V0IGlnbm9yZVNjcmlwdHMgdHJ1ZSAtLWxvY2F0aW9uPWdsb2JhbDsgfSAmJiB7IHBucG0gY29uZmlnIHNldCB0cnVzdFBvbGljeSBuby1kb3duZ3JhZGUgLS1sb2NhdGlvbj1nbG9iYWw7IH0gJiYgZWNobyAnWy5iYXNocmNdIFNldCBwbnBtIHNlY3VyaXR5IHNldHRpbmdzJwogICAgICAgIGVsc2UKICAgICAgICAgICAgaWYgeyBwbnBtIGNvbmZpZyBzZXQgbWluaW11bS1yZWxlYXNlLWFnZSA3NDg4MCAtLWxvY2F0aW9uPWdsb2JhbDsgfSAmJiB7IHBucG0gY29uZmlnIHNldCB0cnVzdC1wb2xpY3kgbm8tZG93bmdyYWRlIC0tbG9jYXRpb249Z2xvYmFsOyB9ICYmIHsgcG5wbSBjb25maWcgc2V0IGJsb2NrLWV4b3RpYy1zdWJkZXBzIHRydWUgLS1sb2NhdGlvbj1nbG9iYWw7IH07IHRoZW4KICAgICAgICAgICAgICAgIG1rZGlyIC1wICIkKGRpcm5hbWUgIiR7WERHX0NPTkZJR19IT01FOi0kSE9NRS8uY29uZmlnfS9wbnBtL2NvbmZpZy55YW1sIikiCiAgICAgICAgICAgICAgICBlY2hvICdJeUJFYjI0bmRDQnBibk4wWVd4c0lIQmhZMnRoWjJVZ2RtVnljMmx2Ym5NZ2NtVnNaV0Z6WldRZ2JHVnpjeUIwYUdGdUlEVXlJR1JoZVhNZ1lXZHZJQ2hwYmlCdGFXNTFkR1Z6S1FwdGFXNXBiWFZ0VW1Wc1pXRnpaVUZuWlRvZ056UTRPREFLYVdkdWIzSmxVMk55YVhCMGN6b2dkSEoxWlFvaklFWmhhV3dnYVdZZ1lTQndZV05yWVdkbElIWmxjbk5wYjI0Z2FYTWdjSFZpYkdsemFHVmtJSGRwZEdnZ2JHVnpjeUIwY25WemRDQmxkbWxrWlc1alpTQW9aV2NnZDJsMGFHOTFkQ0J3Y205MlpXNWhibU5sS1NCMGFHRnVJSFJvWlNCd2NtVjJhVzkxY3lCMlpYSnphVzl1Y3l3Z2QyaHBZMmdnYVhNZ2RIbHdhV05oYkNCdlppQnpkRzlzWlc0Z2RHOXJaVzV6Q25SeWRYTjBVRzlzYVdONU9pQnVieTFrYjNkdVozSmhaR1VLJyB8IGJhc2U2NCAtZCA+ICIke1hER19DT05GSUdfSE9NRTotJEhPTUUvLmNvbmZpZ30vcG5wbS9jb25maWcueWFtbCIKICAgICAgICAgICAgICAgIGVjaG8gJ1suYmFzaHJjXSBTZXQgcG5wbSBzZWN1cml0eSBzZXR0aW5ncycKICAgICAgICAgICAgZmkKICAgICAgICBmaQogICAgZmkKICAgIGlmIFtbIC1mICIke1hER19DT05GSUdfSE9NRTotJEhPTUUvLmNvbmZpZ30vdXYvdXYudG9tbCIgXV0gJiYgW1sgJChzdGF0IC1jICVZICIke1hER19DT05GSUdfSE9NRTotJEhPTUUvLmNvbmZpZ30vdXYvdXYudG9tbCIpIC1nZSAxNzkzMTk5Nzk5IF1dOyB0aGVuCiAgICAgICAgOiAjIEFscmVhZHkgdXAgdG8gZGF0ZQogICAgZWxpZiAhIGNvbW1hbmQgLXYgJ3V2JyA+L2Rldi9udWxsOyB0aGVuCiAgICAgICAgOiAjIHV2IGlzIG5vdCBpbnN0YWxsZWQKICAgIGVsc2UKICAgICAgICBta2RpciAtcCAiJChkaXJuYW1lICIke1hER19DT05GSUdfSE9NRTotJEhPTUUvLmNvbmZpZ30vdXYvdXYudG9tbCIpIgogICAgICAgIGVjaG8gJ0l5QkViMjRuZENCcGJuTjBZV3hzSUhCaFkydGhaMlVnZG1WeWMybHZibk1nY21Wc1pXRnpaV1FnYkdWemN5QjBhR0Z1SURVeUlHUmhlWE1nWVdkdkxpQk9aV1ZrY3lCMWRpQXdMamt1TVRjckxDQnZiR1JsY2lCMlpYSnphVzl1Y3lCbVlXbHNJSFJ2SUhCaGNuTmxJSFJvWlNCa2RYSmhkR2x2YmdwbGVHTnNkV1JsTFc1bGQyVnlJRDBnSWpVeUlHUmhlWE1pQ2lNZ1FuVnBiR1JwYm1jZ2MyOTFjbU5sSUdScGMzUnlhV0oxZEdsdmJuTWdjblZ1Y3lCaGNtSnBkSEpoY25rZ1kyOWtaUzRnVlhObElDMHRibTh0WTI5dVptbG5JSFJ2SUdsdWMzUmhiR3dnWVNCd1lXTnJZV2RsSUhSb1lYUWdhR0Z6SUc1dklIZG9aV1ZzY3dwdWJ5MWlkV2xzWkNBOUlIUnlkV1VLJyB8IGJhc2U2NCAtZCA+ICIke1hER19DT05GSUdfSE9NRTotJEhPTUUvLmNvbmZpZ30vdXYvdXYudG9tbCIKICAgICAgICBlY2hvICdbLmJhc2hyY10gU2V0IHV2IHNlY3VyaXR5IHNldHRpbmdzJwogICAgZmkKICAgIGlmIFtbIC1mICIke1hER19DT05GSUdfSE9NRTotJEhPTUV9Ly5idW5maWcudG9tbCIgXV0gJiYgW1sgJChzdGF0IC1jICVZICIke1hER19DT05GSUdfSE9NRTotJEhPTUV9Ly5idW5maWcudG9tbCIpIC1nZSAxNzkzMTk5ODA0IF1dOyB0aGVuCiAgICAgICAgOiAjIEFscmVhZHkgdXAgdG8gZGF0ZQogICAgZWxpZiAhIGNvbW1hbmQgLXYgJ2J1bicgPi9kZXYvbnVsbDsgdGhlbgogICAgICAgIDogIyBidW4gaXMgbm90IGluc3RhbGxlZAogICAgZWxzZQogICAgICAgIG1rZGlyIC1wICIkKGRpcm5hbWUgIiR7WERHX0NPTkZJR19IT01FOi0kSE9NRX0vLmJ1bmZpZy50b21sIikiCiAgICAgICAgZWNobyAnVzJsdWMzUmhiR3hkQ2lNZ1JHOXVKM1FnYVc1emRHRnNiQ0J3WVdOcllXZGxJSFpsY25OcGIyNXpJSEpsYkdWaGMyVmtJR3hsYzNNZ2RHaGhiaUExTWlCa1lYbHpJR0ZuYnlBb2FXNGdjMlZqYjI1a2N5a0tiV2x1YVcxMWJWSmxiR1ZoYzJWQloyVWdQU0EwTkRreU9EQXdDbWxuYm05eVpWTmpjbWx3ZEhNZ1BTQjBjblZsQ2c9PScgfCBiYXNlNjQgLWQgPiAiJHtYREdfQ09ORklHX0hPTUU6LSRIT01FfS8uYnVuZmlnLnRvbWwiCiAgICAgICAgZWNobyAnWy5iYXNocmNdIFNldCBidW4gc2VjdXJpdHkgc2V0dGluZ3MnCiAgICBmaQpmaQo=')
 $writeFileDest = "$env:USERPROFILE\.bashrc"
-if ((Test-Path -LiteralPath $writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793088331).UtcDateTime) {
-    Write-Host 'Already set .bashrc' -ForegroundColor DarkGray
+if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793202601).UtcDateTime) {
+    Write-Host "Already set .bashrc" -ForegroundColor DarkGray
 } else {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
     [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
-    echo 'Set .bashrc'
+    echo "Set .bashrc"
 }
 if ($applyToDefaultUser) {
     $writeFileDest = "$defaultUserProfile\.bashrc"
-    if ((Test-Path -LiteralPath $writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793088331).UtcDateTime) {
-        Write-Host 'Already set .bashrc for default user' -ForegroundColor DarkGray
+    if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793202601).UtcDateTime) {
+        Write-Host "Already set .bashrc for default user" -ForegroundColor DarkGray
     } else {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
         [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
-        echo 'Set .bashrc for default user'
+        echo "Set .bashrc for default user"
     }
 }
 
@@ -1477,18 +1490,137 @@ if ($applyToDefaultUser -and -not (Test-Path "$defaultUserProfile\.bash_profile"
     [IO.File]::WriteAllText("$defaultUserProfile\.bash_profile", $bashProfileContent)
 }
 
+#Make "#!/usr/bin/env python3" shebangs work in git bash. A bash alias would not apply to shebangs, so it has to be a script in /usr/bin
+if (Test-Path -LiteralPath "$env:ProgramFiles\Git\usr\bin") {
+    $writeFileContent = [Convert]::FromBase64String('IyEvYmluL3NoCiMgcHl0aG9uMyBhbGlhcyBmb3IgZ2l0IGJhc2gsIGFzIFB5dGhvbiBvbiBXaW5kb3dzIG9ubHkgcHJvdmlkZXMgcHl0aG9uLmV4ZQpleGVjIHB5dGhvbiAiJEAiCg==')
+    $writeFileDest = "$env:ProgramFiles\Git\usr\bin\python3"
+    if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793103179).UtcDateTime) {
+        Write-Host "Already added python3 alias to git bash" -ForegroundColor DarkGray
+    } elseif (-not $isAdmin) {
+        Write-Host "Cannot add python3 alias to git bash, needs admin rights" -ForegroundColor Yellow
+    } else {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+        [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+        echo "Added python3 alias to git bash"
+    }
+}
+
+#Mitigate supply chain attacks: don't install package versions released less than 52 days ago (most malicious versions are detected and removed by then), and don't run install scripts
+#If the config file already exists, npm or pnpm is presumably installed, so use it to edit the config, keeping the other settings (eg auth tokens)
+#For pnpm, --location=global is the config of the current user
+$writeFileContent = [Convert]::FromBase64String('IyBEb24ndCBpbnN0YWxsIHBhY2thZ2UgdmVyc2lvbnMgcmVsZWFzZWQgbGVzcyB0aGFuIDUyIGRheXMgYWdvLiBOZWVkcyBucG0gMTEuMTArLCBvbGRlciB2ZXJzaW9ucyBkaXNwbGF5IGEgd2FybmluZwptaW4tcmVsZWFzZS1hZ2U9NTIKaWdub3JlLXNjcmlwdHM9dHJ1ZQojIEdpdCBkZXBlbmRlbmNpZXMgYnlwYXNzIHRoZSByZWdpc3RyeSwgc28gbWluLXJlbGVhc2UtYWdlIGRvZXMgbm90IGFwcGx5IHRvIHRoZW0uIERlZmF1bHQgaW4gbnBtIDEyCmFsbG93LWdpdD1ub25lCg==')
+$writeFileDest = "$env:USERPROFILE\.npmrc"
+if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793199795).UtcDateTime) {
+    Write-Host "Already set npm security settings" -ForegroundColor DarkGray
+} elseif ([IO.File]::Exists($writeFileDest)) {
+    npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=user
+    if ($LASTEXITCODE -ne 0) {throw 'Failed to run: npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=user'}
+    npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=global
+    if ($LASTEXITCODE -ne 0) {throw 'Failed to run: npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=global'}
+    echo "Set npm security settings"
+} else {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+    [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+    echo "Set npm security settings"
+}
+if ($applyToDefaultUser) {
+    $writeFileDest = "$defaultUserProfile\.npmrc"
+    if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793199795).UtcDateTime) {
+        Write-Host "Already set npm security settings for default user" -ForegroundColor DarkGray
+    } else {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+        [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+        echo "Set npm security settings for default user"
+    }
+}
+#pnpm 11+ reads its settings from config.yaml instead of rc. If config.yaml does not exist, pnpm 10 is presumably installed, so set the settings in rc with the commands
+#config.yaml is still written, so that the commands are not run again and pnpm is configured once upgraded
+if (Get-Command pnpm -ErrorAction SilentlyContinue) {
+    $writeFileContent = [Convert]::FromBase64String('IyBEb24ndCBpbnN0YWxsIHBhY2thZ2UgdmVyc2lvbnMgcmVsZWFzZWQgbGVzcyB0aGFuIDUyIGRheXMgYWdvIChpbiBtaW51dGVzKQptaW5pbXVtUmVsZWFzZUFnZTogNzQ4ODAKaWdub3JlU2NyaXB0czogdHJ1ZQojIEZhaWwgaWYgYSBwYWNrYWdlIHZlcnNpb24gaXMgcHVibGlzaGVkIHdpdGggbGVzcyB0cnVzdCBldmlkZW5jZSAoZWcgd2l0aG91dCBwcm92ZW5hbmNlKSB0aGFuIHRoZSBwcmV2aW91cyB2ZXJzaW9ucywgd2hpY2ggaXMgdHlwaWNhbCBvZiBzdG9sZW4gdG9rZW5zCnRydXN0UG9saWN5OiBuby1kb3duZ3JhZGUK')
+    $writeFileDest = "$env:LOCALAPPDATA\pnpm\config\config.yaml"
+    if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793199796).UtcDateTime) {
+        Write-Host "Already set pnpm security settings" -ForegroundColor DarkGray
+    } elseif ([IO.File]::Exists($writeFileDest)) {
+        pnpm config set minimumReleaseAge 74880 --location=global
+        if ($LASTEXITCODE -ne 0) {throw 'Failed to run: pnpm config set minimumReleaseAge 74880 --location=global'}
+        pnpm config set ignoreScripts true --location=global
+        if ($LASTEXITCODE -ne 0) {throw 'Failed to run: pnpm config set ignoreScripts true --location=global'}
+        pnpm config set trustPolicy no-downgrade --location=global
+        if ($LASTEXITCODE -ne 0) {throw 'Failed to run: pnpm config set trustPolicy no-downgrade --location=global'}
+        echo "Set pnpm security settings"
+    } else {
+        pnpm config set minimum-release-age 74880 --location=global
+        if ($LASTEXITCODE -ne 0) {throw 'Failed to run: pnpm config set minimum-release-age 74880 --location=global'}
+        pnpm config set trust-policy no-downgrade --location=global
+        if ($LASTEXITCODE -ne 0) {throw 'Failed to run: pnpm config set trust-policy no-downgrade --location=global'}
+        pnpm config set block-exotic-subdeps true --location=global
+        if ($LASTEXITCODE -ne 0) {throw 'Failed to run: pnpm config set block-exotic-subdeps true --location=global'}
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+        [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+        echo "Set pnpm security settings"
+    }
+    if ($applyToDefaultUser) {
+        $writeFileDest = "$defaultUserProfile\AppData\Local\pnpm\config\config.yaml"
+        if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793199796).UtcDateTime) {
+            Write-Host "Already set pnpm security settings for default user" -ForegroundColor DarkGray
+        } else {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+            [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+            echo "Set pnpm security settings for default user"
+        }
+    }
+}
+$writeFileContent = [Convert]::FromBase64String('IyBEb24ndCBpbnN0YWxsIHBhY2thZ2UgdmVyc2lvbnMgcmVsZWFzZWQgbGVzcyB0aGFuIDUyIGRheXMgYWdvLiBOZWVkcyB1diAwLjkuMTcrLCBvbGRlciB2ZXJzaW9ucyBmYWlsIHRvIHBhcnNlIHRoZSBkdXJhdGlvbgpleGNsdWRlLW5ld2VyID0gIjUyIGRheXMiCiMgQnVpbGRpbmcgc291cmNlIGRpc3RyaWJ1dGlvbnMgcnVucyBhcmJpdHJhcnkgY29kZS4gVXNlIC0tbm8tY29uZmlnIHRvIGluc3RhbGwgYSBwYWNrYWdlIHRoYXQgaGFzIG5vIHdoZWVscwpuby1idWlsZCA9IHRydWUK')
+$writeFileDest = "$env:APPDATA\uv\uv.toml"
+if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793199799).UtcDateTime) {
+    Write-Host "Already set uv security settings" -ForegroundColor DarkGray
+} else {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+    [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+    echo "Set uv security settings"
+}
+if ($applyToDefaultUser) {
+    $writeFileDest = "$defaultUserProfile\AppData\Roaming\uv\uv.toml"
+    if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793199799).UtcDateTime) {
+        Write-Host "Already set uv security settings for default user" -ForegroundColor DarkGray
+    } else {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+        [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+        echo "Set uv security settings for default user"
+    }
+}
+$writeFileContent = [Convert]::FromBase64String('W2luc3RhbGxdCiMgRG9uJ3QgaW5zdGFsbCBwYWNrYWdlIHZlcnNpb25zIHJlbGVhc2VkIGxlc3MgdGhhbiA1MiBkYXlzIGFnbyAoaW4gc2Vjb25kcykKbWluaW11bVJlbGVhc2VBZ2UgPSA0NDkyODAwCmlnbm9yZVNjcmlwdHMgPSB0cnVlCg==')
+$writeFileDest = "$env:USERPROFILE\.bunfig.toml"
+if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793199804).UtcDateTime) {
+    Write-Host "Already set bun security settings" -ForegroundColor DarkGray
+} else {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+    [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+    echo "Set bun security settings"
+}
+if ($applyToDefaultUser) {
+    $writeFileDest = "$defaultUserProfile\.bunfig.toml"
+    if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793199804).UtcDateTime) {
+        Write-Host "Already set bun security settings for default user" -ForegroundColor DarkGray
+    } else {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+        [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+        echo "Set bun security settings for default user"
+    }
+}
+
 # Custom French keyboard
 
 $writeFileContent = [Convert]::FromBase64String('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')
 $writeFileDest = "$env:SystemRoot\System32\keyboard_fr_improved_zez.dev.dll"
-if ((Test-Path -LiteralPath $writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1764028165).UtcDateTime) {
-    Write-Host 'Already installed enhanced French keyboard dll' -ForegroundColor DarkGray
+if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1764028165).UtcDateTime) {
+    Write-Host "Already installed enhanced French keyboard dll" -ForegroundColor DarkGray
 } elseif (-not $isAdmin) {
-    Write-Host 'Cannot install enhanced French keyboard dll, needs admin rights' -ForegroundColor Yellow
+    Write-Host "Cannot install enhanced French keyboard dll, needs admin rights" -ForegroundColor Yellow
 } else {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
     [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
-    echo 'Installed enhanced French keyboard dll'
+    echo "Installed enhanced French keyboard dll"
 }
 
 $frenchKeyboardId = "0000040c"
@@ -1498,56 +1630,120 @@ applyRegEdits "Set enhanced French keyboard as substitute for standard French ke
 )
 
 
+#Only for the current user (new users get the default preferences below)
+$firefoxProfilesPath = "$env:APPDATA\Mozilla\Firefox\Profiles"
+$firefoxPath = "$env:ProgramFiles\Mozilla Firefox\firefox.exe"
+#Profiles are created when Firefox is first launched
+if (-not (Test-Path -LiteralPath $firefoxProfilesPath) -and (Test-Path -LiteralPath $firefoxPath)) {
+    #Firefox creates its profiles like a normal first launch, then exits once the screenshot is taken
+    $firefoxScreenshotPath = "$env:TEMP\zez.dev_firefox_first_launch.png"
+    Start-Process -FilePath $firefoxPath -ArgumentList "--headless", "--screenshot", "`"$firefoxScreenshotPath`"", "about:blank" -Wait
+    Remove-Item -LiteralPath $firefoxScreenshotPath
+    echo "Launched Firefox headless to create its profiles"
+}
+if (Test-Path -LiteralPath $firefoxProfilesPath) {
+    foreach ($firefoxProfile in Get-ChildItem -LiteralPath $firefoxProfilesPath -Directory) {
+        $firefoxProfileName = $firefoxProfile.Name
+        $firefoxProfilePath = $firefoxProfile.FullName
+        $writeFileContent = [Convert]::FromBase64String('LyogcHJldmVudCBhdWRpbyBwbGF5aW5nIHRhYnMgZnJvbSBtb2RpZnlpbmcgdGFiIHdpZHRoICovCi50YWJicm93c2VyLXRhYiB7CgkmOmlzKFttdXRlZF0sIFtzb3VuZHBsYXlpbmddLCBbYWN0aXZlbWVkaWEtYmxvY2tlZF0pIHsKCQkjdGFiYnJvd3Nlci10YWJzW29yaWVudD0iaG9yaXpvbnRhbCJdICY6bm90KFtwaW5uZWRdKSB7CgkJCS0tdGFiLW1pbi13aWR0aDogdW5zZXQgIWltcG9ydGFudDsKCQkJbWluLXdpZHRoOiB2YXIoLS10YWItbWluLXdpZHRoLXByZWYsIHZhcigtLXRhYi1taW4td2lkdGgpKSAhaW1wb3J0YW50OwoJCX0KCX0KfQovKiBwdXQgYXVkaW8gYnV0dG9uIGJhY2sgYWJvdmUgZmF2aWNvbiAqLwojdGFiYnJvd3Nlci10YWJzOmlzKFtvcmllbnQ9InZlcnRpY2FsIl1bZXhwYW5kZWRdLCBbb3JpZW50PSJob3Jpem9udGFsIl0pIC50YWJicm93c2VyLXRhYjpub3QoW3Bpbm5lZF0pOm5vdChbY3Jhc2hlZF0pOmlzKFtzb3VuZHBsYXlpbmddLCBbbXV0ZWRdLCBbYWN0aXZlbWVkaWEtYmxvY2tlZF0pIHsKCgkudGFiLWF1ZGlvLWJ1dHRvbiB7CgkJLS1idXR0b24tc2l6ZS1pY29uLXNtYWxsOiAxMnB4ICFpbXBvcnRhbnQ7CgkJLS1idXR0b24tbWluLWhlaWdodC1zbWFsbDogMTBweCAhaW1wb3J0YW50OwoJCW1hcmdpbjogMCAhaW1wb3J0YW50OwoJCXRyYW5zZm9ybTogdHJhbnNsYXRlWSgtOXB4KSB0cmFuc2xhdGVYKC0yNHB4KTsKCQl6LWluZGV4OiA5OTk5OwoJCS0taWNvbi1zaXplLWRlZmF1bHQ6IDlweCAhaW1wb3J0YW50OwoJCXdpZHRoOiAzLjVweCAhaW1wb3J0YW50OwoJfQoJCgkudGFiLWF1ZGlvLWJ1dHRvbjo6YWZ0ZXIgewoJCXdpZHRoOiAxMXB4OwoJCWRpc3BsYXk6IGlubGluZS1ibG9jazsKCQliYWNrZ3JvdW5kLWNvbG9yOiByZ2JhKDAsMCwwLDAuNik7CgkJaGVpZ2h0OiAxMXB4OwoJCWNvbnRlbnQ6ICIiOwoJCXBvc2l0aW9uOiBhYnNvbHV0ZTsKCQl0b3A6IDA7CgkJbGVmdDogMDsKCQltYXJnaW4tdG9wOiAxcHg7CgkJei1pbmRleDogLTE7CgkJYm9yZGVyLXJhZGl1czogNHB4OwoJCW1hcmdpbi1sZWZ0OiAxcHg7Cgl9Cn0KCi8qIFNldCBjb25zdGFudCB0YWIgd2lkdGguIERpc2FibGVkIGFzIEkgbGlrZSB0aGUgY3VycmVudCBiZWhhdmlvciAqLwovKi50YWJicm93c2VyLXRhYltmYWRlaW5dOm5vdChbcGlubmVkXSkgeyAKCW1heC13aWR0aDogMTQwcHggIWltcG9ydGFudDsKCW1pbi13aWR0aDogMTQwcHggIWltcG9ydGFudDsKfSovCgovKiBEaXNwbGF5IGZ1bGwgdGFiIHRpdGxlIGluIHByZXZpZXcgKi8KCiN0YWItcHJldmlldy1wYW5lbCAudGFiLXByZXZpZXctdGl0bGUgewoJLXdlYmtpdC1saW5lLWNsYW1wOiBub25lICFpbXBvcnRhbnQ7Cn0KCi8qIFJlbW92ZSB1c2VsZXNzICJGaXJlZm94IGlzIG9uIGd1YXJkIiB3aGVuIGNsaWNraW5nIG9uIHNoaWVsZCBpY29uKi8KI3RydXN0cGFuZWwtZ3JhcGhpYy1zZWN0aW9uIHsgZGlzcGxheTogbm9uZSAhaW1wb3J0YW50OyB9Cg==')
+        $writeFileDest = "$firefoxProfilePath\chrome\userChrome.css"
+        if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793098667).UtcDateTime) {
+            Write-Host "Already set Firefox userChrome.css for profile $firefoxProfileName" -ForegroundColor DarkGray
+        } else {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+            [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+            echo "Set Firefox userChrome.css for profile $firefoxProfileName"
+        }
+        #user.js is read at each startup, so Firefox does not need to be closed
+        $writeFileContent = [Convert]::FromBase64String('Ly8gRmlyZWZveCBwcmVmZXJlbmNlcywgd3JpdHRlbiB0byB0aGUgdXNlci5qcyBvZiBlYWNoIHByb2ZpbGUgKGFwcGxpZWQgYXQgZWFjaCBzdGFydHVwKQovLyBBbHNvIHdyaXR0ZW4gdG8gZGVmYXVsdHNccHJlZiBpbiB0aGUgRmlyZWZveCBpbnN0YWxsIGZvbGRlciBmb3IgbmV3IHVzZXJzLCB3aXRoIHVzZXJfcHJlZiByZXBsYWNlZCBieSBwcmVmLCB3aGljaCBvbmx5IHNldHMgdGhlIGRlZmF1bHQgdmFsdWUKdXNlcl9wcmVmKCJhY2Nlc3NpYmlsaXR5LmJyb3dzZXdpdGhjYXJldF9zaG9ydGN1dC5lbmFibGVkIiwgZmFsc2UpOyAvLyBEaXNhYmxlIHRoZSBGNyBjYXJldCBicm93c2luZyBzaG9ydGN1dAp1c2VyX3ByZWYoImFjY2Vzc2liaWxpdHkudHlwZWFoZWFkZmluZC5mbGFzaEJhciIsIDApOyAvLyBGaXJlZm94IGZsYXNoZXMgdGhlIGZpbmQgYmFyIHRoZSBmaXJzdCB0aW1lIGl0IGlzIG9wZW5lZCwgdGhlbiBzZXRzIHRoaXMgdG8gMAp1c2VyX3ByZWYoImJyb3dzZXIuYWJvdXRDb25maWcuc2hvd1dhcm5pbmciLCBmYWxzZSk7CnVzZXJfcHJlZigiYnJvd3Nlci5jb21wYWN0bW9kZS5zaG93IiwgdHJ1ZSk7IC8vIFNob3cgdGhlICJDb21wYWN0IiBkZW5zaXR5IGluICJDdXN0b21pemUgdG9vbGJhciIKdXNlcl9wcmVmKCJicm93c2VyLmlwUHJvdGVjdGlvbi5oYXNTZWVuRmVhdHVyZSIsIHRydWUpOwp1c2VyX3ByZWYoImJyb3dzZXIubmV3dGFicGFnZS5hY3Rpdml0eS1zdHJlYW0uZmVlZHMuc2VjdGlvbi50b3BzdG9yaWVzIiwgZmFsc2UpOwp1c2VyX3ByZWYoImJyb3dzZXIubmV3dGFicGFnZS5hY3Rpdml0eS1zdHJlYW0uZmVlZHMudG9wc2l0ZXMiLCBmYWxzZSk7CnVzZXJfcHJlZigiYnJvd3Nlci5uZXd0YWJwYWdlLmFjdGl2aXR5LXN0cmVhbS5zaG93U2VhcmNoIiwgZmFsc2UpOwp1c2VyX3ByZWYoImJyb3dzZXIubmV3dGFicGFnZS5hY3Rpdml0eS1zdHJlYW0uc2hvd1Nwb25zb3JlZCIsIGZhbHNlKTsKdXNlcl9wcmVmKCJicm93c2VyLm5ld3RhYnBhZ2UuYWN0aXZpdHktc3RyZWFtLnNob3dTcG9uc29yZWRDaGVja2JveGVzIiwgZmFsc2UpOwp1c2VyX3ByZWYoImJyb3dzZXIubmV3dGFicGFnZS5hY3Rpdml0eS1zdHJlYW0uc2hvd1Nwb25zb3JlZFRvcFNpdGVzIiwgZmFsc2UpOwp1c2VyX3ByZWYoImJyb3dzZXIubmV3dGFicGFnZS5waW5uZWQiLCAiW10iKTsKdXNlcl9wcmVmKCJicm93c2VyLm5vdmEuZW5hYmxlZCIsIGZhbHNlKTsKdXNlcl9wcmVmKCJicm93c2VyLnRhYnMuaW5zZXJ0QWZ0ZXJDdXJyZW50RXhjZXB0UGlubmVkIiwgdHJ1ZSk7CnVzZXJfcHJlZigiYnJvd3Nlci50YWJzLnNwbGl0dmlldy5oYXNVc2VkIiwgdHJ1ZSk7CnVzZXJfcHJlZigiYnJvd3Nlci50cmFuc2xhdGlvbnMubmV2ZXJUcmFuc2xhdGVMYW5ndWFnZXMiLCAiZW4iKTsKdXNlcl9wcmVmKCJicm93c2VyLnVybGJhci5zdWdnZXN0LnRyZW5kaW5nIiwgZmFsc2UpOwp1c2VyX3ByZWYoImJyb3dzZXIudXJsYmFyLnRyaW1VUkxzIiwgZmFsc2UpOyAvLyBBbHdheXMgZGlzcGxheSBodHRwL2h0dHBzIGluIHRoZSB1cmwKdXNlcl9wcmVmKCJkZXZ0b29scy5jYWNoZS5kaXNhYmxlZCIsIHRydWUpOwp1c2VyX3ByZWYoImRldnRvb2xzLmV2ZXJPcGVuZWQiLCB0cnVlKTsKdXNlcl9wcmVmKCJ0b29sa2l0LmxlZ2FjeVVzZXJQcm9maWxlQ3VzdG9taXphdGlvbnMuc3R5bGVzaGVldHMiLCB0cnVlKTsgLy8gTG9hZCB1c2VyQ2hyb21lLmNzcwp1c2VyX3ByZWYoInZpZXdfc291cmNlLndyYXBfbG9uZ19saW5lcyIsIHRydWUpOwp1c2VyX3ByZWYoIndpZGdldC5ub24tbmF0aXZlLXRoZW1lLnNjcm9sbGJhci5zdHlsZSIsIDQpOwp1c2VyX3ByZWYoIndpZGdldC5ub24tbmF0aXZlLXRoZW1lLndpbi5zY3JvbGxiYXIudXNlLXN5c3RlbS1zaXplIiwgdHJ1ZSk7Cg==')
+        $writeFileDest = "$firefoxProfilePath\user.js"
+        if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793248924).UtcDateTime) {
+            Write-Host "Already set Firefox preferences for profile $firefoxProfileName" -ForegroundColor DarkGray
+        } else {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+            [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+            echo "Set Firefox preferences for profile $firefoxProfileName"
+        }
+    }
+}
+#Firefox loads all the files of defaults\pref as default preferences, for all users
+if ($applyToDefaultUser -and (Test-Path -LiteralPath $firefoxPath)) {
+    $writeFileContent = [Convert]::FromBase64String('Ly8gRmlyZWZveCBwcmVmZXJlbmNlcywgd3JpdHRlbiB0byB0aGUgdXNlci5qcyBvZiBlYWNoIHByb2ZpbGUgKGFwcGxpZWQgYXQgZWFjaCBzdGFydHVwKQovLyBBbHNvIHdyaXR0ZW4gdG8gZGVmYXVsdHNccHJlZiBpbiB0aGUgRmlyZWZveCBpbnN0YWxsIGZvbGRlciBmb3IgbmV3IHVzZXJzLCB3aXRoIHVzZXJfcHJlZiByZXBsYWNlZCBieSBwcmVmLCB3aGljaCBvbmx5IHNldHMgdGhlIGRlZmF1bHQgdmFsdWUKcHJlZigiYWNjZXNzaWJpbGl0eS5icm93c2V3aXRoY2FyZXRfc2hvcnRjdXQuZW5hYmxlZCIsIGZhbHNlKTsgLy8gRGlzYWJsZSB0aGUgRjcgY2FyZXQgYnJvd3Npbmcgc2hvcnRjdXQKcHJlZigiYWNjZXNzaWJpbGl0eS50eXBlYWhlYWRmaW5kLmZsYXNoQmFyIiwgMCk7IC8vIEZpcmVmb3ggZmxhc2hlcyB0aGUgZmluZCBiYXIgdGhlIGZpcnN0IHRpbWUgaXQgaXMgb3BlbmVkLCB0aGVuIHNldHMgdGhpcyB0byAwCnByZWYoImJyb3dzZXIuYWJvdXRDb25maWcuc2hvd1dhcm5pbmciLCBmYWxzZSk7CnByZWYoImJyb3dzZXIuY29tcGFjdG1vZGUuc2hvdyIsIHRydWUpOyAvLyBTaG93IHRoZSAiQ29tcGFjdCIgZGVuc2l0eSBpbiAiQ3VzdG9taXplIHRvb2xiYXIiCnByZWYoImJyb3dzZXIuaXBQcm90ZWN0aW9uLmhhc1NlZW5GZWF0dXJlIiwgdHJ1ZSk7CnByZWYoImJyb3dzZXIubmV3dGFicGFnZS5hY3Rpdml0eS1zdHJlYW0uZmVlZHMuc2VjdGlvbi50b3BzdG9yaWVzIiwgZmFsc2UpOwpwcmVmKCJicm93c2VyLm5ld3RhYnBhZ2UuYWN0aXZpdHktc3RyZWFtLmZlZWRzLnRvcHNpdGVzIiwgZmFsc2UpOwpwcmVmKCJicm93c2VyLm5ld3RhYnBhZ2UuYWN0aXZpdHktc3RyZWFtLnNob3dTZWFyY2giLCBmYWxzZSk7CnByZWYoImJyb3dzZXIubmV3dGFicGFnZS5hY3Rpdml0eS1zdHJlYW0uc2hvd1Nwb25zb3JlZCIsIGZhbHNlKTsKcHJlZigiYnJvd3Nlci5uZXd0YWJwYWdlLmFjdGl2aXR5LXN0cmVhbS5zaG93U3BvbnNvcmVkQ2hlY2tib3hlcyIsIGZhbHNlKTsKcHJlZigiYnJvd3Nlci5uZXd0YWJwYWdlLmFjdGl2aXR5LXN0cmVhbS5zaG93U3BvbnNvcmVkVG9wU2l0ZXMiLCBmYWxzZSk7CnByZWYoImJyb3dzZXIubmV3dGFicGFnZS5waW5uZWQiLCAiW10iKTsKcHJlZigiYnJvd3Nlci5ub3ZhLmVuYWJsZWQiLCBmYWxzZSk7CnByZWYoImJyb3dzZXIudGFicy5pbnNlcnRBZnRlckN1cnJlbnRFeGNlcHRQaW5uZWQiLCB0cnVlKTsKcHJlZigiYnJvd3Nlci50YWJzLnNwbGl0dmlldy5oYXNVc2VkIiwgdHJ1ZSk7CnByZWYoImJyb3dzZXIudHJhbnNsYXRpb25zLm5ldmVyVHJhbnNsYXRlTGFuZ3VhZ2VzIiwgImVuIik7CnByZWYoImJyb3dzZXIudXJsYmFyLnN1Z2dlc3QudHJlbmRpbmciLCBmYWxzZSk7CnByZWYoImJyb3dzZXIudXJsYmFyLnRyaW1VUkxzIiwgZmFsc2UpOyAvLyBBbHdheXMgZGlzcGxheSBodHRwL2h0dHBzIGluIHRoZSB1cmwKcHJlZigiZGV2dG9vbHMuY2FjaGUuZGlzYWJsZWQiLCB0cnVlKTsKcHJlZigiZGV2dG9vbHMuZXZlck9wZW5lZCIsIHRydWUpOwpwcmVmKCJ0b29sa2l0LmxlZ2FjeVVzZXJQcm9maWxlQ3VzdG9taXphdGlvbnMuc3R5bGVzaGVldHMiLCB0cnVlKTsgLy8gTG9hZCB1c2VyQ2hyb21lLmNzcwpwcmVmKCJ2aWV3X3NvdXJjZS53cmFwX2xvbmdfbGluZXMiLCB0cnVlKTsKcHJlZigid2lkZ2V0Lm5vbi1uYXRpdmUtdGhlbWUuc2Nyb2xsYmFyLnN0eWxlIiwgNCk7CnByZWYoIndpZGdldC5ub24tbmF0aXZlLXRoZW1lLndpbi5zY3JvbGxiYXIudXNlLXN5c3RlbS1zaXplIiwgdHJ1ZSk7Cg==')
+    $writeFileDest = "$env:ProgramFiles\Mozilla Firefox\defaults\pref\zez.dev.js"
+    if ([IO.File]::Exists($writeFileDest) -and (Get-Item -LiteralPath $writeFileDest -Force).LastWriteTimeUtc -ge [DateTimeOffset]::FromUnixTimeSeconds(1793248924).UtcDateTime) {
+        Write-Host "Already set Firefox default preferences" -ForegroundColor DarkGray
+    } else {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $writeFileDest) | Out-Null
+        [IO.File]::WriteAllBytes($writeFileDest, $writeFileContent)
+        echo "Set Firefox default preferences"
+    }
+}
+
 $notepadplusplusPath = "$env:ProgramFiles\Notepad++\notepad++.exe"
 if (-not (Test-Path -LiteralPath $notepadplusplusPath)) {
     Write-Host "Could not find Notepad++ install path at '$notepadplusplusPath'. Install it at https://notepad-plus-plus.org/downloads/ if necessary." -ForegroundColor Yellow
 } else {
     #Todo: maybe on a new windows install notepad++ is not registered. Potentially gotta use Register-FTA
-    $ConfigPath = "$env:APPDATA\Notepad++\config.xml"
-    $Xml = [xml](Get-Content -Path $ConfigPath)
-    $Node = $Xml.SelectSingleNode("//GUIConfig[@name='ScintillaPrimaryView']")
+    $nppConfigPath = "$env:APPDATA\Notepad++\config.xml"
+    $nppSettings = @(
+        #GUIConfig name, attribute, value, message
+        @("ScintillaPrimaryView", "Wrap", "yes", "Enabled Notepad++ line wrap"),
+        @("ScintillaPrimaryView", "scrollBeyondLastLine", "yes", "Enabled Notepad++ scroll beyond last line"),
+        #Set new document to be LF instead of CRLF
+        @("NewDocDefaultSettings", "format", "2", "Set Notepad++ new document line ending to LF"),
+        @("DarkMode", "enable", "yes", "Set Notepad++ dark mode")
+    )
 
-    $areNppModificationsRequired = $false
-    if ($Node) {
-        if ($Node.GetAttribute("Wrap") -eq "yes") {
-            Write-Host "Already enabled Notepad++ line wrap" -ForegroundColor DarkGray
-        } else {
-            $Node.SetAttribute("Wrap", "yes")
-            $areNppModificationsRequired = $true
-            echo "Enabled Notepad++ line wrap"
+    function getNppConfigChanges {
+        #Returns config.xml with $nppSettings applied, and the messages of the changed settings
+        $xml = New-Object xml
+        #Unlike Get-Content, uses the encoding of the xml declaration
+        $xml.Load($nppConfigPath)
+        $changedSettings = @()
+        foreach ($setting in $nppSettings) {
+            $guiConfigName, $attribute, $value, $message = $setting
+            $node = $xml.SelectSingleNode("//GUIConfig[@name='$guiConfigName']")
+            if (-not $node) {throw "Could not find '$guiConfigName' node in config.xml"}
+            if ($node.GetAttribute($attribute) -ne $value) {
+                $node.SetAttribute($attribute, $value)
+                $changedSettings += $message
+            }
         }
-        if ($Node.GetAttribute("scrollBeyondLastLine") -eq "yes") {
-            Write-Host "Already enabled Notepad++ scroll beyond last line" -ForegroundColor DarkGray
-        } else {
-            $Node.SetAttribute("scrollBeyondLastLine", "yes")
-            $areNppModificationsRequired = $true
-            echo "Enabled Notepad++ scroll beyond last line"
-        }
-    }
-    else {
-        Write-Error "Could not find 'ScintillaPrimaryView' node in config.xml"
+        return @{Xml = $xml; ChangedSettings = $changedSettings}
     }
 
-    #Set new document to be LF instead of CRLF
-    $Node = $Xml.SelectSingleNode("//GUIConfig[@name='NewDocDefaultSettings']")
-    if ($Node) {
-        if ($Node.GetAttribute("format") -eq "2") {
-            Write-Host "Already set Notepad++ new document line ending to LF" -ForegroundColor DarkGray
-        } else {
-            $Node.SetAttribute("format", "2")
-            $areNppModificationsRequired = $true
-            echo "Set Notepad++ new document line ending to LF"
+    #Notepad++ creates config.xml when it exits, so if it was never run, launch and close it (if it is running for the first time, closing it is enough)
+    if (-not (Test-Path -LiteralPath $nppConfigPath) -and (promptCloseProcess "notepad++") -and -not (Test-Path -LiteralPath $nppConfigPath)) {
+        $nppProcess = Start-Process -FilePath $notepadplusplusPath -PassThru
+        #The main window must exist to be closed
+        $nppDeadline = (Get-Date).AddSeconds(30)
+        while ($nppProcess.MainWindowHandle -eq 0) {
+            if ($nppProcess.HasExited -or (Get-Date) -gt $nppDeadline) {throw "Notepad++ did not open its window"}
+            Start-Sleep -Milliseconds 100
+            $nppProcess.Refresh()
         }
+        #Unlike killing it, closing the window makes Notepad++ write its config
+        [void]$nppProcess.CloseMainWindow()
+        if (-not $nppProcess.WaitForExit(30000)) {throw "Notepad++ did not close"}
+        if (-not (Test-Path -LiteralPath $nppConfigPath)) {throw "Notepad++ did not create '$nppConfigPath'"}
+        echo "Launched and closed Notepad++ to create its config"
     }
-    else {
-        Write-Error "Could not find 'NewDocDefaultSettings' node in config.xml"
-    }
-    
-    if ($areNppModificationsRequired) {
-        if (Get-Process -Name "notepad++" -ErrorAction SilentlyContinue) {
-            Write-Host "Notepad++ is running, close it then relaunch this script to modify the notepad++ config" -ForegroundColor Yellow
+
+    if (-not (Test-Path -LiteralPath $nppConfigPath)) {
+        Write-Host "Cannot set Notepad++ config, notepad++.exe is running" -ForegroundColor Yellow
+    } else {
+        $nppConfigChanges = getNppConfigChanges
+        if ($nppConfigChanges.ChangedSettings.Count -eq 0) {
+            Write-Host "Already set Notepad++ config" -ForegroundColor DarkGray
+        } elseif (-not (promptCloseProcess "notepad++")) {
+            Write-Host "Cannot set Notepad++ config, notepad++.exe is running" -ForegroundColor Yellow
         } else {
-            $Xml.Save($ConfigPath)
+            #Notepad++ writes config.xml when it exits, so read it again in case it was just closed
+            $nppConfigChanges = getNppConfigChanges
+            $nppConfigChanges.Xml.Save($nppConfigPath)
+            foreach ($message in $nppConfigChanges.ChangedSettings) {
+                echo $message
+            }
         }
     }
 

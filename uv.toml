@@ -1,0 +1,4 @@
+# Don't install package versions released less than 52 days ago. Needs uv 0.9.17+, older versions fail to parse the duration
+exclude-newer = "52 days"
+# Building source distributions runs arbitrary code. Use --no-config to install a package that has no wheels
+no-build = true

@@ -13,6 +13,15 @@ echo ""
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+trap {
+    Write-Host ($_ | Out-String) -ForegroundColor Red
+    #A loaded hive locks the default profile files. Unloaded before the pause, in case the console is closed during it
+    if ($applyToDefaultUser) {
+        try {unloadDefaultUserHives} catch {Write-Host ($_ | Out-String) -ForegroundColor Red}
+    }
+    Read-Host "Press Enter to exit"
+    break
+}
 
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal ([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 
@@ -38,6 +47,20 @@ if ($isAdmin) {echo "Running as Administrator"} else {echo "Running as standard 
 $isWindows11 = ((Get-CimInstance -ClassName Win32_OperatingSystem).Version -ge "10.0.22000")
 if ($isWindows11) {echo "Detected Windows 11"} else {echo "Detected Windows 10 or lower"}
 
+#Allow running local scripts (eg the npm.ps1 and pnpm.ps1 shims), for all users if admin, else for the current user
+$executionPolicyScope, $executionPolicySuffix = if ($isAdmin) {"LocalMachine", ""} else {"CurrentUser", " for current user"}
+if ((Get-ExecutionPolicy -Scope $executionPolicyScope) -in @("RemoteSigned", "Unrestricted", "Bypass")) {
+    Write-Host "Already allowed PowerShell scripts$executionPolicySuffix" -ForegroundColor DarkGray
+} else {
+    try {
+        Set-ExecutionPolicy RemoteSigned -Scope $executionPolicyScope -Force
+    } catch {
+        #Thrown although the policy is set, if a more specific scope overrides it (eg -ExecutionPolicy Bypass when relaunched as admin)
+        if ($_.FullyQualifiedErrorId -notlike "ExecutionPolicyOverride,*") {throw}
+    }
+    echo "Allowed PowerShell scripts$executionPolicySuffix"
+}
+
 $needsExplorerRestart = $false
 $needsSignOut = $false
 $needsAdmin = $false
@@ -54,11 +77,6 @@ if ($isAdmin) {
 }
 if ($applyToDefaultUser) {
     loadDefaultUserHives
-}
-#Make sure the default user hives are unloaded if the script crashes, as a loaded hive locks the default profile files
-trap {
-    if ($applyToDefaultUser) {unloadDefaultUserHives}
-    break
 }
 
 §include taskbar.ps1
@@ -90,6 +108,18 @@ if ($isWindows11) {
 
     #Not applied to the default user, as AppData\Local\Packages is created when the apps are installed for a new user, and pre-creating it may break that
     §writeFile {"src": "w11_terminal.json", "dest": "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json", "applyConfigValues": true, "msg": "Applied Windows Terminal settings", "defaultUser": false}
+}
+
+#Remove the app execution aliases that shadow the programs in the PATH: python.exe and python3.exe open the Microsoft Store, bash.exe launches WSL
+foreach ($appAlias in @("bash.exe", "python.exe", "python3.exe")) {
+    $appAliasPath = "$env:LOCALAPPDATA\Microsoft\WindowsApps\$appAlias"
+    #The aliases are reparse points, use .NET as PowerShell may try to follow them
+    if ([IO.File]::Exists($appAliasPath)) {
+        [IO.File]::Delete($appAliasPath)
+        echo "Removed $appAlias app execution alias"
+    } else {
+        Write-Host "Already removed $appAlias app execution alias" -ForegroundColor DarkGray
+    }
 }
 
 applyRegEdits "Disable window shake to minimize" @(
@@ -271,6 +301,26 @@ patchShortcut "powershell x86" "$env:APPDATA\Microsoft\Windows\Start Menu\Progra
 
 patchShortcut "cmd" "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\System Tools\Command Prompt.lnk" "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" 0x49F
 
+#Shortcut to the startup folder in the home folder. A shortcut to the folder itself would contain its absolute path, whereas explorer.exe shell:startup opens the startup folder of the user, so the shortcut also works when copied from the default user profile
+$startupShortcutTargets = @(,@("$env:USERPROFILE\Startup.lnk", ""))
+if ($applyToDefaultUser) {
+    $startupShortcutTargets += ,@("$defaultUserProfile\Startup.lnk", " for default user")
+}
+$wshShell = New-Object -ComObject WScript.Shell
+foreach ($target in $startupShortcutTargets) {
+    $shortcutPath, $msgSuffix = $target
+    #Loads the shortcut if it exists
+    $shortcut = $wshShell.CreateShortcut($shortcutPath)
+    if ($shortcut.TargetPath -eq "$env:SystemRoot\explorer.exe" -and $shortcut.Arguments -eq "shell:startup") {
+        Write-Host "Already added startup folder shortcut$msgSuffix" -ForegroundColor DarkGray
+        continue
+    }
+    $shortcut.TargetPath = "$env:SystemRoot\explorer.exe"
+    $shortcut.Arguments = "shell:startup"
+    $shortcut.Save()
+    echo "Added startup folder shortcut$msgSuffix"
+}
+
 
 # We can get conditional prompts with the autorun value, but only at startup (can't display git branch for example)
 # Using environment variables is risky in batch, so don't add user@hostname when connecting via ssh to avoid potential command injection
@@ -337,6 +387,23 @@ if ($applyToDefaultUser -and -not (Test-Path "$defaultUserProfile\.bash_profile"
     [IO.File]::WriteAllText("$defaultUserProfile\.bash_profile", $bashProfileContent)
 }
 
+#Make "#!/usr/bin/env python3" shebangs work in git bash. A bash alias would not apply to shebangs, so it has to be a script in /usr/bin
+if (Test-Path -LiteralPath "$env:ProgramFiles\Git\usr\bin") {
+    §writeFile {"src": "python3", "dest": "$env:ProgramFiles\Git\usr\bin\python3", "msg": "Added python3 alias to git bash", "needsAdmin": true}
+}
+
+#Mitigate supply chain attacks: don't install package versions released less than 52 days ago (most malicious versions are detected and removed by then), and don't run install scripts
+#If the config file already exists, npm or pnpm is presumably installed, so use it to edit the config, keeping the other settings (eg auth tokens)
+#For pnpm, --location=global is the config of the current user
+§writeFile {"src": "npmrc", "dest": "$env:USERPROFILE\.npmrc", "msg": "Set npm security settings", "ifAlreadyExists": ["npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=user", "npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=global"]}
+#pnpm 11+ reads its settings from config.yaml instead of rc. If config.yaml does not exist, pnpm 10 is presumably installed, so set the settings in rc with the commands
+#config.yaml is still written, so that the commands are not run again and pnpm is configured once upgraded
+if (Get-Command pnpm -ErrorAction SilentlyContinue) {
+    §writeFile {"src": "pnpm_config.yaml", "dest": "$env:LOCALAPPDATA\pnpm\config\config.yaml", "msg": "Set pnpm security settings", "ifAlreadyExists": ["pnpm config set minimumReleaseAge 74880 --location=global", "pnpm config set ignoreScripts true --location=global", "pnpm config set trustPolicy no-downgrade --location=global"], "ifNotExists": ["pnpm config set minimum-release-age 74880 --location=global", "pnpm config set trust-policy no-downgrade --location=global", "pnpm config set block-exotic-subdeps true --location=global"]}
+}
+§writeFile {"src": "uv.toml", "dest": "$env:APPDATA\uv\uv.toml", "msg": "Set uv security settings"}
+§writeFile {"src": "bunfig.toml", "dest": "$env:USERPROFILE\.bunfig.toml", "msg": "Set bun security settings"}
+
 # Custom French keyboard
 
 §writeFile {"src": "keyboard.klc", "dest": "$env:SystemRoot\System32\keyboard_fr_improved_zez.dev.dll", "msg": "Installed enhanced French keyboard dll", "needsAdmin": true}
@@ -347,6 +414,7 @@ applyRegEdits "Set enhanced French keyboard as substitute for standard French ke
     @("SetProperty", "HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layouts\$frenchKeyboardId", "Layout File", "keyboard_fr_improved_zez.dev.dll", @{signout=$true})
 )
 
+§include firefox.ps1
 §include npp.ps1
 
 # Refresh explorer to apply changes
