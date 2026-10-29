@@ -1,13 +1,10 @@
 #!/bin/bash
-# .bashrc version 2026-10-28
+# .bashrc version 2026-10-29
 # curl zez.dev -Lo .bashrc
 # wget zez.dev -O .bashrc
 
 # If not running interactively, don't do anything
-case $- in
-    *i*) ;;
-      *) return;;
-esac
+[[ $- == *i* ]] || return 0
 
 
 HISTCONTROL=ignoreboth # don't put duplicate lines or lines starting with space in the history
@@ -51,9 +48,7 @@ if command -v git >/dev/null; then
     gacp() { git add -A && git commit --allow-empty-message -m "$1" && git push; }
 fi
 
-if [ -f ~/.bash_aliases ]; then
-    . ~/.bash_aliases
-fi
+[[ -f ~/.bash_aliases ]] && . ~/.bash_aliases
 
 
 # set variable identifying the chroot you work in (used in the prompt below)
@@ -65,7 +60,7 @@ prompt_get_git_branch() {
     title=$1
     _PROMPT_CURRENT_GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
     if [[ $_PROMPT_CURRENT_GIT_BRANCH == "HEAD" ]]; then
-        #If checking out a specific commit, we need to use --short
+    #If checking out a specific commit, we need to use --short
         _PROMPT_CURRENT_GIT_BRANCH=$(git rev-parse --short HEAD 2>/dev/null)
     fi
     if [[ ! -z $_PROMPT_CURRENT_GIT_BRANCH && $_PROMPT_CURRENT_GIT_BRANCH != "main" && $_PROMPT_CURRENT_GIT_BRANCH != "master" ]]; then
@@ -113,13 +108,7 @@ else
 fi
 
 # If this is an xterm set the title to user@host: dir <branch>
-case "$TERM" in
-xterm*|rxvt*)
-    PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\$(prompt_display_user_hostname && echo '\u@$PROMPT_HOSTNAME: ' || echo '')\w\$(prompt_get_git_branch true)\$(prompt_get_mingw64 true)\a\]$PS1"
-    ;;
-*)
-    ;;
-esac
+[[ $TERM == xterm* || $TERM == rxvt* ]] && PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\$(prompt_display_user_hostname && echo '\u@$PROMPT_HOSTNAME: ' || echo '')\w\$(prompt_get_git_branch true)\$(prompt_get_mingw64 true)\a\]$PS1"
 
 
 # enable programmable completion features
@@ -135,13 +124,14 @@ export PYTHONDONTWRITEBYTECODE=1
 
 #Automatically display column names in sqlite cli and add color to prompt
 #Unfortunately max sqlite prompt length is 18 chars (including escape chars) so we can only have 5 chars max displayed
-if [[ -f "$HOME/.sqliterc" ]] && [[ $(stat -c %Y "$HOME/.sqliterc") -ge 1793083095 ]]; then
-    : # Already up to date
-elif ! command -v 'sqlite3' >/dev/null; then
-    : # sqlite3 is not installed
-else
+if command -v 'sqlite3' >/dev/null && [[ ! -f "$HOME/.sqliterc" || $(stat -c %Y "$HOME/.sqliterc") -lt 1793083095 ]]; then
     mkdir -p "$(dirname "$HOME/.sqliterc")"
-    echo 'LS1Ob3RlOiB0aGlzIGlzIGF1dG9tYXRpY2FsbHkgZ2VuZXJhdGVkIGFuZCBvdmVyd3JpdHRlbiBieSAuYmFzaHJjCi5oZWFkZXJzIE9OCi5tb2RlIGNvbHVtbnMKLm51bGx2YWx1ZSA8TlVMTD4KLnByb21wdCAiARtbOTJtAnNxbAEbWzBtAj4gIiAiARtbMzZtAi4uLgEbWzBtAj4gIgo=' | base64 -d > "$HOME/.sqliterc"
+    printf '%s' $'--Note: this is automatically generated and overwritten by .bashrc
+.headers ON
+.mode columns
+.nullvalue <NULL>
+.prompt "\x01\x1b[92m\x02sql\x01\x1b[0m\x02> " "\x01\x1b[36m\x02...\x01\x1b[0m\x02> "
+' > "$HOME/.sqliterc"
     echo '[.bashrc] Added .sqliterc'
 fi
 
@@ -155,11 +145,91 @@ export MYSQL_PS1=$'\001\e[01;35m\002mysql\001\e[0m\002 \001\e[01;32m\002\\u\001\
 #prompt = () => "\u001b[92m"+db.getName()+"\u001b[0m>";
 #EOF
 
-if [[ -f "$HOME/.vimrc" ]] && [[ $(stat -c %Y "$HOME/.vimrc") -ge 1793084032 ]]; then
-    : # Already up to date
-else
+if [[ ! -f "$HOME/.vimrc" || $(stat -c %Y "$HOME/.vimrc") -lt 1793084032 ]]; then
     mkdir -p "$(dirname "$HOME/.vimrc")"
-    echo 'Ik5vdGU6IHRoaXMgaXMgYXV0b21hdGljYWxseSBnZW5lcmF0ZWQgYW5kIG92ZXJ3cml0dGVuIGJ5IC5iYXNocmMKCiIgUmVvcGVuIHRoZSBsYXN0IGVkaXRlZCBwb3NpdGlvbiBpbiBmaWxlcwphdSBCdWZSZWFkUG9zdCAqIGlmIGxpbmUoIidcIiIpID4gMSAmJiBsaW5lKCInXCIiKSA8PSBsaW5lKCIkIikgfCBleGUgIm5vcm1hbCEgZydcIiIgfCBlbmRpZgoiU3ludGF4IGNvbG9yYXRpb24Kc3ludGF4IG9uCiJMb2FkIHBsdWdpbnMgYmFzZWQgb24gZmlsZSB0eXBlCmZpbGV0eXBlIG9uCiJEaXNwbGF5IGxpbmUgbnVtYmVycy4gVG9kbzogdG9vIGRpc3RyYWN0aW5nLgoic2V0IG51bWJlcgoiSW5zZXJ0cyBzcGFjZXMgd2hlbiBwcmVzc2luZyB0aGUgdGFiIGtleQpzZXQgZXhwYW5kdGFiCiJTZXQgdGFiIHdpZHRoIHRvIDQgc3BhY2VzCnNldCB0YWJzdG9wPTQKc2V0IHNvZnR0YWJzdG9wPTQKc2V0IHNoaWZ0d2lkdGg9NAoKIkRvIG5vdCBjb250aW51ZSBjb21tZW50IHdoZW4gcHJlc3NpbmcgRW50ZXIKYXV0b2NtZCBGaWxlVHlwZSAqIHNldCBmb3JtYXRvcHRpb25zLT1jcm8KCiJEaXNhYmxlIGF1dG9pbmRlbnQsIGFzIGl0IG1lc3NlcyB1cCBwYXN0aW5nCmZpbGV0eXBlIGluZGVudCBvZmYKc2V0IG5vYXV0b2luZGVudApzZXQgbm9jaW5kZW50CnNldCBub3NtYXJ0aW5kZW50CnNldCBpbmRlbnRleHByJgoKIkhpZ2hsaWdodCBtYXRjaGluZyBicmFja2V0cwpzZXQgc2hvd21hdGNoCgoiQ2FzZSBpbnNlbnNpdGl2ZSBtYXRjaGluZyBpbiBzZWFyY2gKc2V0IGlnbm9yZWNhc2UKc2V0IHNtYXJ0Y2FzZQoiSGlnaGxpZ2h0IHNlYXJjaCBtYXRjaGVzCnNldCBobHNlYXJjaAoKIkFsbG93IHNlbGVjdGluZyB3aXRoIHRoZSBtb3VzZQpzZXQgbW91c2U9YQoKIlRoZSBmb2xsb3dpbmcgaXMgbm9ybWFsbHkgaW4gZGViaWFuLnZpbSBidXQgaXQgZG9lcyBub3QgZ2V0IHNvdXJjZWQgaWYgdmltcmMgZXhpc3RzCgpzZXQgbm9jb21wYXRpYmxlCSIgVXNlIFZpbSBkZWZhdWx0cyBpbnN0ZWFkIG9mIDEwMCUgdmkgY29tcGF0aWJpbGl0eQpzZXQgYmFja3NwYWNlPWluZGVudCxlb2wsc3RhcnQJIiBtb3JlIHBvd2VyZnVsIGJhY2tzcGFjaW5nCnNldCBoaXN0b3J5PTUwCQkiIGtlZXAgNTAgbGluZXMgb2YgY29tbWFuZCBsaW5lIGhpc3RvcnkKc2V0IHJ1bGVyCQkiIHNob3cgdGhlIGN1cnNvciBwb3NpdGlvbiBhbGwgdGhlIHRpbWUKc2V0IG5vbW9kZWxpbmUKIiBTdWZmaXhlcyB0aGF0IGdldCBsb3dlciBwcmlvcml0eSB3aGVuIGRvaW5nIHRhYiBjb21wbGV0aW9uIGZvciBmaWxlbmFtZXMuCiIgVGhlc2UgYXJlIGZpbGVzIHdlIGFyZSBub3QgbGlrZWx5IHRvIHdhbnQgdG8gZWRpdCBvciByZWFkLgpzZXQgc3VmZml4ZXM9LmJhayx+LC5zd3AsLm8sLmluZm8sLmF1eCwubG9nLC5kdmksLmJibCwuYmxnLC5icmYsLmNiLC5pbmQsLmlkeCwuaWxnLC5pbngsLm91dCwudG9jCgoiIFdlIGtub3cgeHRlcm0tZGViaWFuIGlzIGEgY29sb3IgdGVybWluYWwKaWYgJnRlcm0gPX4gInh0ZXJtLWRlYmlhbiIgfHwgJnRlcm0gPX4gInh0ZXJtLXhmcmVlODYiCiAgc2V0IHRfQ289MTYKICBzZXQgdF9TZj0bWzMlZG0KICBzZXQgdF9TYj0bWzQlZG0KZW5kaWYKCiIgU29tZSBEZWJpYW4tc3BlY2lmaWMgdGhpbmdzCmlmIGhhcygnZ3VpJykKICAiIE11c3QgZGVmaW5lIHRoaXMgd2l0aGluIHRoZSA6aWYgc28gaXQgZG9lcyBub3QgY2F1c2UgcHJvYmxlbXMgd2l0aAogICIgdmltLXRpbnkgKHdoaWNoIGRvZXMgbm90IGhhdmUgK2V2YWwpCiAgZnVuY3Rpb24hIDxTSUQ+TWFwRXhpc3RzKG5hbWUsIG1vZGVzKQogICAgZm9yIG1vZGUgaW4gc3BsaXQoYTptb2RlcywgJ1x6cycpCiAgICAgIGlmICFlbXB0eShtYXBhcmcoYTpuYW1lLCBtb2RlKSkKICAgICAgICByZXR1cm4gMQogICAgICBlbmRpZgogICAgZW5kZm9yCiAgICByZXR1cm4gMAogIGVuZGZ1bmN0aW9uCgogICIgTWFrZSBzaGlmdC1pbnNlcnQgd29yayBsaWtlIGluIFh0ZXJtCiAgYXV0b2NtZCBHVUlFbnRlciAqIGlmICE8U0lEPk1hcEV4aXN0cygiPFMtSW5zZXJ0PiIsICJudnNvIikgfCBleGVjdXRlICJtYXAgPFMtSW5zZXJ0PiA8TWlkZGxlTW91c2U+IiB8IGVuZGlmCiAgYXV0b2NtZCBHVUlFbnRlciAqIGlmICE8U0lEPk1hcEV4aXN0cygiPFMtSW5zZXJ0PiIsICJpYyIpIHwgZXhlY3V0ZSAibWFwISA8Uy1JbnNlcnQ+IDxNaWRkbGVNb3VzZT4iIHwgZW5kaWYKZW5kaWYKCiIgU2V0IHBhcGVyIHNpemUgZnJvbSAvZXRjL3BhcGVyc2l6ZSBpZiBhdmFpbGFibGUgKERlYmlhbi1zcGVjaWZpYykKaWYgZmlsZXJlYWRhYmxlKCIvZXRjL3BhcGVyc2l6ZSIpCiAgbGV0IHM6cGFwZXJzaXplID0gbWF0Y2hzdHIocmVhZGZpbGUoJy9ldGMvcGFwZXJzaXplJywgJycsIDEpLCAnXHAqJykKICBpZiBzdHJsZW4oczpwYXBlcnNpemUpCiAgICBleGUgInNldCBwcmludG9wdGlvbnMrPXBhcGVyOiIgLiBzOnBhcGVyc2l6ZQogIGVuZGlmCmVuZGlmCg==' | base64 -d > "$HOME/.vimrc"
+    printf '%s' $'"Note: this is automatically generated and overwritten by .bashrc
+
+" Reopen the last edited position in files
+au BufReadPost * if line("\'\\"") > 1 && line("\'\\"") <= line("$") | exe "normal! g\'\\"" | endif
+"Syntax coloration
+syntax on
+"Load plugins based on file type
+filetype on
+"Display line numbers. Todo: too distracting.
+"set number
+"Inserts spaces when pressing the tab key
+set expandtab
+"Set tab width to 4 spaces
+set tabstop=4
+set softtabstop=4
+set shiftwidth=4
+
+"Do not continue comment when pressing Enter
+autocmd FileType * set formatoptions-=cro
+
+"Disable autoindent, as it messes up pasting
+filetype indent off
+set noautoindent
+set nocindent
+set nosmartindent
+set indentexpr&
+
+"Highlight matching brackets
+set showmatch
+
+"Case insensitive matching in search
+set ignorecase
+set smartcase
+"Highlight search matches
+set hlsearch
+
+"Allow selecting with the mouse
+set mouse=a
+
+"The following is normally in debian.vim but it does not get sourced if vimrc exists
+
+set nocompatible	" Use Vim defaults instead of 100% vi compatibility
+set backspace=indent,eol,start	" more powerful backspacing
+set history=50		" keep 50 lines of command line history
+set ruler		" show the cursor position all the time
+set nomodeline
+" Suffixes that get lower priority when doing tab completion for filenames.
+" These are files we are not likely to want to edit or read.
+set suffixes=.bak,~,.swp,.o,.info,.aux,.log,.dvi,.bbl,.blg,.brf,.cb,.ind,.idx,.ilg,.inx,.out,.toc
+
+" We know xterm-debian is a color terminal
+if &term =~ "xterm-debian" || &term =~ "xterm-xfree86"
+  set t_Co=16
+  set t_Sf=\x1b[3%dm
+  set t_Sb=\x1b[4%dm
+endif
+
+" Some Debian-specific things
+if has(\'gui\')
+  " Must define this within the :if so it does not cause problems with
+  " vim-tiny (which does not have +eval)
+  function! <SID>MapExists(name, modes)
+    for mode in split(a:modes, \'\\zs\')
+      if !empty(maparg(a:name, mode))
+        return 1
+      endif
+    endfor
+    return 0
+  endfunction
+
+  " Make shift-insert work like in Xterm
+  autocmd GUIEnter * if !<SID>MapExists("<S-Insert>", "nvso") | execute "map <S-Insert> <MiddleMouse>" | endif
+  autocmd GUIEnter * if !<SID>MapExists("<S-Insert>", "ic") | execute "map! <S-Insert> <MiddleMouse>" | endif
+endif
+
+" Set paper size from /etc/papersize if available (Debian-specific)
+if filereadable("/etc/papersize")
+  let s:papersize = matchstr(readfile(\'/etc/papersize\', \'\', 1), \'\\p*\')
+  if strlen(s:papersize)
+    exe "set printoptions+=paper:" . s:papersize
+  endif
+endif
+' > "$HOME/.vimrc"
     echo '[.bashrc] Added .vimrc'
 fi
 
@@ -167,48 +237,56 @@ fi
 if [[ -z $MSYSTEM ]]; then
     #If the config file already exists, use the program to edit it, keeping the other settings (eg auth tokens)
     #The global npm config is usually only writable by root. For pnpm, --location=global is the config of the current user
-    if [[ -f "$HOME/.npmrc" ]] && [[ $(stat -c %Y "$HOME/.npmrc") -ge 1793199795 ]]; then
-        : # Already up to date
-    elif ! command -v 'npm' >/dev/null; then
-        : # npm is not installed
-    elif [[ -f "$HOME/.npmrc" ]]; then
-        { npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=user; } && { [[ $EUID -ne 0 ]] || npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=global; } && echo '[.bashrc] Set npm security settings'
-    else
-        mkdir -p "$(dirname "$HOME/.npmrc")"
-        echo 'IyBEb24ndCBpbnN0YWxsIHBhY2thZ2UgdmVyc2lvbnMgcmVsZWFzZWQgbGVzcyB0aGFuIDUyIGRheXMgYWdvLiBOZWVkcyBucG0gMTEuMTArLCBvbGRlciB2ZXJzaW9ucyBkaXNwbGF5IGEgd2FybmluZwptaW4tcmVsZWFzZS1hZ2U9NTIKaWdub3JlLXNjcmlwdHM9dHJ1ZQojIEdpdCBkZXBlbmRlbmNpZXMgYnlwYXNzIHRoZSByZWdpc3RyeSwgc28gbWluLXJlbGVhc2UtYWdlIGRvZXMgbm90IGFwcGx5IHRvIHRoZW0uIERlZmF1bHQgaW4gbnBtIDEyCmFsbG93LWdpdD1ub25lCg==' | base64 -d > "$HOME/.npmrc"
-        echo '[.bashrc] Set npm security settings'
+    if command -v 'npm' >/dev/null && [[ ! -f "$HOME/.npmrc" || $(stat -c %Y "$HOME/.npmrc") -lt 1793199795 ]]; then
+        if [[ -f "$HOME/.npmrc" ]]; then
+            { npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=user; } && { [[ $EUID -ne 0 ]] || npm config set min-release-age=52 ignore-scripts=true allow-git=none --location=global; } && echo '[.bashrc] Set npm security settings'
+        else
+            mkdir -p "$(dirname "$HOME/.npmrc")"
+            printf '%s' '# Don'\''t install package versions released less than 52 days ago. Needs npm 11.10+, older versions display a warning
+min-release-age=52
+ignore-scripts=true
+# Git dependencies bypass the registry, so min-release-age does not apply to them. Default in npm 12
+allow-git=none
+' > "$HOME/.npmrc"
+            echo '[.bashrc] Set npm security settings'
+        fi
     fi
     #pnpm 11+ reads its settings from config.yaml instead of rc. If config.yaml does not exist, pnpm 10 is presumably installed, so set the settings in rc with the commands
     #config.yaml is still written, so that the commands are not run again and pnpm is configured once upgraded
     if command -v pnpm >/dev/null; then
-        if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml" ]] && [[ $(stat -c %Y "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml") -ge 1793199796 ]]; then
-            : # Already up to date
-        elif [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml" ]]; then
-            { pnpm config set minimumReleaseAge 74880 --location=global; } && { pnpm config set ignoreScripts true --location=global; } && { pnpm config set trustPolicy no-downgrade --location=global; } && echo '[.bashrc] Set pnpm security settings'
-        else
-            if { pnpm config set minimum-release-age 74880 --location=global; } && { pnpm config set trust-policy no-downgrade --location=global; } && { pnpm config set block-exotic-subdeps true --location=global; }; then
-                mkdir -p "$(dirname "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml")"
-                echo 'IyBEb24ndCBpbnN0YWxsIHBhY2thZ2UgdmVyc2lvbnMgcmVsZWFzZWQgbGVzcyB0aGFuIDUyIGRheXMgYWdvIChpbiBtaW51dGVzKQptaW5pbXVtUmVsZWFzZUFnZTogNzQ4ODAKaWdub3JlU2NyaXB0czogdHJ1ZQojIEZhaWwgaWYgYSBwYWNrYWdlIHZlcnNpb24gaXMgcHVibGlzaGVkIHdpdGggbGVzcyB0cnVzdCBldmlkZW5jZSAoZWcgd2l0aG91dCBwcm92ZW5hbmNlKSB0aGFuIHRoZSBwcmV2aW91cyB2ZXJzaW9ucywgd2hpY2ggaXMgdHlwaWNhbCBvZiBzdG9sZW4gdG9rZW5zCnRydXN0UG9saWN5OiBuby1kb3duZ3JhZGUK' | base64 -d > "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml"
-                echo '[.bashrc] Set pnpm security settings'
+        if [[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml" || $(stat -c %Y "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml") -lt 1793199796 ]]; then
+            if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml" ]]; then
+                { pnpm config set minimumReleaseAge 74880 --location=global; } && { pnpm config set ignoreScripts true --location=global; } && { pnpm config set trustPolicy no-downgrade --location=global; } && echo '[.bashrc] Set pnpm security settings'
+            else
+                if { pnpm config set minimum-release-age 74880 --location=global; } && { pnpm config set trust-policy no-downgrade --location=global; } && { pnpm config set block-exotic-subdeps true --location=global; }; then
+                    mkdir -p "$(dirname "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml")"
+                    printf '%s' '# Don'\''t install package versions released less than 52 days ago (in minutes)
+minimumReleaseAge: 74880
+ignoreScripts: true
+# Fail if a package version is published with less trust evidence (eg without provenance) than the previous versions, which is typical of stolen tokens
+trustPolicy: no-downgrade
+' > "${XDG_CONFIG_HOME:-$HOME/.config}/pnpm/config.yaml"
+                    echo '[.bashrc] Set pnpm security settings'
+                fi
             fi
         fi
     fi
-    if [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" ]] && [[ $(stat -c %Y "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml") -ge 1793199799 ]]; then
-        : # Already up to date
-    elif ! command -v 'uv' >/dev/null; then
-        : # uv is not installed
-    else
+    if command -v 'uv' >/dev/null && [[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml" || $(stat -c %Y "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml") -lt 1793199799 ]]; then
         mkdir -p "$(dirname "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml")"
-        echo 'IyBEb24ndCBpbnN0YWxsIHBhY2thZ2UgdmVyc2lvbnMgcmVsZWFzZWQgbGVzcyB0aGFuIDUyIGRheXMgYWdvLiBOZWVkcyB1diAwLjkuMTcrLCBvbGRlciB2ZXJzaW9ucyBmYWlsIHRvIHBhcnNlIHRoZSBkdXJhdGlvbgpleGNsdWRlLW5ld2VyID0gIjUyIGRheXMiCiMgQnVpbGRpbmcgc291cmNlIGRpc3RyaWJ1dGlvbnMgcnVucyBhcmJpdHJhcnkgY29kZS4gVXNlIC0tbm8tY29uZmlnIHRvIGluc3RhbGwgYSBwYWNrYWdlIHRoYXQgaGFzIG5vIHdoZWVscwpuby1idWlsZCA9IHRydWUK' | base64 -d > "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml"
+        printf '%s' '# Don'\''t install package versions released less than 52 days ago. Needs uv 0.9.17+, older versions fail to parse the duration
+exclude-newer = "52 days"
+# Building source distributions runs arbitrary code. Use --no-config to install a package that has no wheels
+no-build = true
+' > "${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv.toml"
         echo '[.bashrc] Set uv security settings'
     fi
-    if [[ -f "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml" ]] && [[ $(stat -c %Y "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml") -ge 1793199804 ]]; then
-        : # Already up to date
-    elif ! command -v 'bun' >/dev/null; then
-        : # bun is not installed
-    else
+    if command -v 'bun' >/dev/null && [[ ! -f "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml" || $(stat -c %Y "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml") -lt 1793199804 ]]; then
         mkdir -p "$(dirname "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml")"
-        echo 'W2luc3RhbGxdCiMgRG9uJ3QgaW5zdGFsbCBwYWNrYWdlIHZlcnNpb25zIHJlbGVhc2VkIGxlc3MgdGhhbiA1MiBkYXlzIGFnbyAoaW4gc2Vjb25kcykKbWluaW11bVJlbGVhc2VBZ2UgPSA0NDkyODAwCmlnbm9yZVNjcmlwdHMgPSB0cnVlCg==' | base64 -d > "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml"
+        printf '%s' '[install]
+# Don'\''t install package versions released less than 52 days ago (in seconds)
+minimumReleaseAge = 4492800
+ignoreScripts = true
+' > "${XDG_CONFIG_HOME:-$HOME}/.bunfig.toml"
         echo '[.bashrc] Set bun security settings'
     fi
 fi

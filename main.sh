@@ -4,10 +4,7 @@
 # wget zez.dev -O .bashrc
 
 # If not running interactively, don't do anything
-case $- in
-    *i*) ;;
-      *) return;;
-esac
+[[ $- == *i* ]] || return 0
 
 
 HISTCONTROL=ignoreboth # don't put duplicate lines or lines starting with space in the history
@@ -51,9 +48,7 @@ if command -v git >/dev/null; then
     gacp() { git add -A && git commit --allow-empty-message -m "$1" && git push; }
 fi
 
-if [ -f ~/.bash_aliases ]; then
-    . ~/.bash_aliases
-fi
+[[ -f ~/.bash_aliases ]] && . ~/.bash_aliases
 
 
 # set variable identifying the chroot you work in (used in the prompt below)
@@ -65,7 +60,7 @@ prompt_get_git_branch() {
     title=$1
     _PROMPT_CURRENT_GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
     if [[ $_PROMPT_CURRENT_GIT_BRANCH == "HEAD" ]]; then
-        #If checking out a specific commit, we need to use --short
+    #If checking out a specific commit, we need to use --short
         _PROMPT_CURRENT_GIT_BRANCH=$(git rev-parse --short HEAD 2>/dev/null)
     fi
     if [[ ! -z $_PROMPT_CURRENT_GIT_BRANCH && $_PROMPT_CURRENT_GIT_BRANCH != "main" && $_PROMPT_CURRENT_GIT_BRANCH != "master" ]]; then
@@ -113,13 +108,7 @@ else
 fi
 
 # If this is an xterm set the title to user@host: dir <branch>
-case "$TERM" in
-xterm*|rxvt*)
-    PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\$(prompt_display_user_hostname && echo '\u@$PROMPT_HOSTNAME: ' || echo '')\w\$(prompt_get_git_branch true)\$(prompt_get_mingw64 true)\a\]$PS1"
-    ;;
-*)
-    ;;
-esac
+[[ $TERM == xterm* || $TERM == rxvt* ]] && PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\$(prompt_display_user_hostname && echo '\u@$PROMPT_HOSTNAME: ' || echo '')\w\$(prompt_get_git_branch true)\$(prompt_get_mingw64 true)\a\]$PS1"
 
 
 # enable programmable completion features

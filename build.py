@@ -2,7 +2,8 @@
 
 Directives, which must be alone on their line:
 - §include <file>: replaced by the content of <file> (relative to this directory).
-- §writeFile {json}: replaced by code that writes the file "src" (embedded in base64) to "dest", unless "dest" already exists and is more recent than "src".
+- §writeFile {json}: replaced by code that writes the file "src" to "dest", unless "dest" already exists and is more recent than "src".
+    "src" is embedded as a string, or in base64 if it is binary (or contains CR, so that its line endings do not depend on the ones of the output).
     - "dest": in windows-setup.ps1, PowerShell variables are expanded (eg $env:APPDATA).
     - "msg": message displayed when writing the file, in past tense (eg "Added .vimrc"). Also used for the "Already ..." and "Cannot ..., needs admin rights" messages. In windows-setup.ps1, PowerShell variables are expanded.
     - "command" (optional): only write the file if this command exists.
@@ -36,6 +37,10 @@ KBDUTOOL = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) 
 
 DIRECTIVE_RE = re.compile(r"^(\s*)§(\w+) (.*)$")
 PLACEHOLDER_RE = re.compile(r"###(\w+)###")
+# Control characters other than tab and LF
+SH_ESCAPED_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# Control characters other than tab and LF, and non-ASCII characters
+PS_ESCAPED_CHARS_RE = re.compile(r"([^\t\n\x20-\x7e]+)")
 WRITE_FILE_KEYS = {"src", "dest", "msg", "command", "needsAdmin", "applyConfigValues", "replace", "defaultUser", "ifAlreadyExists", "ifNotExists"}
 DEFAULT_USER_DEST_RE = re.compile(r"^\$env:(USERPROFILE|APPDATA|LOCALAPPDATA)(?=\\)", re.IGNORECASE)
 DEFAULT_USER_FOLDERS = {"USERPROFILE": "", "APPDATA": r"\AppData\Roaming", "LOCALAPPDATA": r"\AppData\Local"}
@@ -97,6 +102,38 @@ def ps_dquote(s):
     return '"' + s.replace("`", "``").replace('"', '`"') + '"'
 
 
+def decode_text(content):
+    # Returns None if the content must be embedded in base64
+    if b"\0" in content or b"\r" in content:
+        return None
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def sh_text(text):
+    # Control characters (eg ESC) are escaped in $'...', as they would be invisible
+    if not SH_ESCAPED_CHARS_RE.search(text):
+        return sh_quote(text)
+    text = re.sub(r"[\\']", lambda match: "\\" + match.group(), text)
+    return "$'" + SH_ESCAPED_CHARS_RE.sub(lambda match: f"\\x{ord(match.group()):02x}", text) + "'"
+
+
+def ps_text(text):
+    # Windows PowerShell reads scripts without BOM with the ANSI code page, so non-ASCII characters are concatenated as [char], like control characters (eg ESC), which would be invisible
+    parts = []
+    for i, part in enumerate(PS_ESCAPED_CHARS_RE.split(text)):
+        if i % 2 == 0:
+            # Starts with a string, so that + concatenates strings
+            if part or i == 0:
+                parts.append(ps_quote(part))
+        else:
+            utf16 = part.encode("utf-16-le")
+            parts += [f"[char]0x{int.from_bytes(utf16[j:j + 2], 'little'):02X}" for j in range(0, len(utf16), 2)]
+    return " + ".join(parts)
+
+
 def sh_run_commands(commands):
     # Braces so that commands containing || are not mixed with the &&
     return " && ".join(f"{{ {command}; }}" for command in commands)
@@ -112,39 +149,40 @@ def ps_run_commands(commands):
     return lines
 
 
-def write_file_bash(dest, content_b64, mtime, msg, command, needs_admin, if_already_exists, if_not_exists):
+def write_file_bash(dest, content, mtime, msg, command, needs_admin, if_already_exists, if_not_exists):
     dest = '"' + re.sub(r"^~/", "$HOME/", dest) + '"'
-    lines = [
-        f"if [[ -f {dest} ]] && [[ $(stat -c %Y {dest}) -ge {mtime} ]]; then",
-        "    : # Already up to date",
-    ]
-    if needs_admin:
-        lines += [
-            "elif [[ $EUID -ne 0 ]]; then",
-            f"    echo {sh_quote(f'[.bashrc] Cannot {present_tense(msg)}, needs root rights')}",
-        ]
-    if command:
-        lines += [
-            f"elif ! command -v {sh_quote(command)} >/dev/null; then",
-            f"    : # {command} is not installed",
-        ]
-    if if_already_exists:
-        lines += [
-            f"elif [[ -f {dest} ]]; then",
-            f"    {sh_run_commands(if_already_exists)} && echo {sh_quote('[.bashrc] ' + msg)}",
-        ]
-    write_lines = [
+    text = decode_text(content)
+    if text is not None:
+        write_content = f"printf '%s' {sh_text(text)} > {dest}"
+    else:
+        write_content = f"echo '{base64.b64encode(content).decode('ascii')}' | base64 -d > {dest}"
+    body = [
         f'mkdir -p "$(dirname {dest})"',
-        f"echo '{content_b64}' | base64 -d > {dest}",
+        write_content,
         f"echo {sh_quote('[.bashrc] ' + msg)}",
     ]
-    lines += ["else"]
     if if_not_exists:
-        lines += [f"    if {sh_run_commands(if_not_exists)}; then", *["        " + line for line in write_lines], "    fi"]
-    else:
-        lines += ["    " + line for line in write_lines]
-    lines += ["fi"]
-    return lines
+        body = [f"if {sh_run_commands(if_not_exists)}; then", *["    " + line for line in body], "fi"]
+    if if_already_exists:
+        body = [
+            f"if [[ -f {dest} ]]; then",
+            f"    {sh_run_commands(if_already_exists)} && echo {sh_quote('[.bashrc] ' + msg)}",
+            "else",
+            *["    " + line for line in body],
+            "fi",
+        ]
+    if needs_admin:
+        body = [
+            "if [[ $EUID -ne 0 ]]; then",
+            f"    echo {sh_quote(f'[.bashrc] Cannot {present_tense(msg)}, needs root rights')}",
+            "else",
+            *["    " + line for line in body],
+            "fi",
+        ]
+    # command -v is a builtin, so it is checked first to avoid forking stat when the command is not installed. [[ ]] does not run stat if dest does not exist
+    conditions = [f"command -v {sh_quote(command)} >/dev/null"] if command else []
+    conditions.append(f"[[ ! -f {dest} || $(stat -c %Y {dest}) -lt {mtime} ]]")
+    return [f"if {' && '.join(conditions)}; then", *["    " + line for line in body], "fi"]
 
 
 def write_file_ps1(dest, mtime, msg, command, needs_admin, if_already_exists, if_not_exists):
@@ -209,11 +247,18 @@ def write_file(arg, lang, origin, inputs):
 
     dest, msg, command, needs_admin = args["dest"], args["msg"], args.get("command"), args.get("needsAdmin", False)
     if_already_exists, if_not_exists = args.get("ifAlreadyExists"), args.get("ifNotExists")
-    content_b64 = base64.b64encode(content).decode("ascii")
     if lang == "bash":
-        return write_file_bash(dest, content_b64, int(mtime), msg, command, needs_admin, if_already_exists, if_not_exists)
+        return write_file_bash(dest, content, int(mtime), msg, command, needs_admin, if_already_exists, if_not_exists)
 
-    lines = [f"$writeFileContent = [Convert]::FromBase64String('{content_b64}')"]
+    text = decode_text(content)
+    if text is not None:
+        lines = [
+            f"$writeFileContent = {ps_text(text)}",
+            # In case the line endings of the output were converted to CRLF
+            '$writeFileContent = [Text.Encoding]::UTF8.GetBytes($writeFileContent.Replace("`r`n", "`n"))',
+        ]
+    else:
+        lines = [f"$writeFileContent = [Convert]::FromBase64String('{base64.b64encode(content).decode('ascii')}')"]
     lines += write_file_ps1(dest, int(mtime), msg, command, needs_admin, if_already_exists, if_not_exists)
     match = DEFAULT_USER_DEST_RE.match(dest)
     if match and args.get("defaultUser", True):
